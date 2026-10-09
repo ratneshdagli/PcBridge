@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'">
+<title>PC Bridge</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside id="rail">
+  <div class="brand"><img src="icon.svg" alt=""><span>PC Bridge</span></div>
+  <div class="link" id="linkbox" aria-live="polite"><div class="row2"><span id="link-state">checking</span><span class="lat" id="link-lat"></span></div><div class="muted" id="link-names">THIS -- REMOTE</div></div>
+  <nav id="nav" aria-label="Sections"></nav>
+  <div class="railfoot" id="railfoot"></div>
+</aside>
+<main id="main"></main>
+<div id="testpanel" class="hidden" role="region" aria-label="Test results"></div>
+<footer id="bar">
+  <span id="bar-upd">starting</span><span id="bar-poll"></span><span class="grow"></span>
+  <span id="bar-mem"></span>
+  <button class="btn" id="bar-test" type="button">Test everything</button>
+</footer>
+<div id="toast" class="hidden" role="status"></div>
+<script src="api.js"></script>
+<script src="ui.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

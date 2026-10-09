@@ -1,0 +1,12 @@
+node_modules/
+dist/
+test-output/
+.ruff_cache/
+*.log
+.env
+.env.*
+config.json
+service.json
+*.pcbapp.json
+.DS_Store
+Thumbs.db
