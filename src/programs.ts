@@ -238,12 +238,15 @@ $res=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{C
 if($res.ReturnValue -ne 0){ throw ('could not start the supervisor, code ' + $res.ReturnValue) }; 'ok'`), { timeout: 30000 });
   if (x.code !== 0) throw fail('could not start the program on the remote', x);
 }
-export interface RemoteState { supervisor: boolean; portUp: boolean; node: boolean }
+export interface RemoteState { supervisor: boolean; portUp: boolean; node: boolean; owner?: string }
 export async function remoteState(c: core.Config, r: core.Remote, p: Program): Promise<RemoteState> {
   const x = await core.psRemote(r, ps(c, `$f="$root\\run\\${p.name}.pid"; $s=$false; if(Test-Path $f){ $s=[bool](Get-Process -Id ([int](Get-Content $f)) -ErrorAction SilentlyContinue) }
 $u=$false; try{ $t=New-Object Net.Sockets.TcpClient; $a=$t.BeginConnect('127.0.0.1',${p.port},$null,$null); $u=$a.AsyncWaitHandle.WaitOne(1500) -and $t.Connected; $t.Close() }catch{}
-"S=$s U=$u N=$(Test-Path "$root\\tools\\node\\node.exe")"`), { timeout: 20000, poll: true });
-  return { supervisor: /S=True/.test(x.stdout), portUp: /U=True/.test(x.stdout), node: /N=True/.test(x.stdout) };
+$o=''; if($u){ try{ $n=@(Get-NetTCPConnection -LocalPort ${p.port} -State Listen -ErrorAction Stop | Where-Object { $_.LocalAddress -in '127.0.0.1','0.0.0.0','::','::1' } | ForEach-Object { (Get-Process -Id $_.OwningProcess -ErrorAction Stop).ProcessName }); $o=$(if($n -match '^sshd?$'){ 'sshd' } else { $n | Select-Object -First 1 }) }catch{} }
+"S=$s U=$u N=$(Test-Path "$root\\tools\\node\\node.exe") O=$o"`), { timeout: 20000, poll: true });
+  // an ssh tunnel that squats on the port accepts connections too: that is not the program answering
+  const owner = (/O=(\S*)/.exec(x.stdout) || [])[1] || '';
+  return { supervisor: /S=True/.test(x.stdout), portUp: /U=True/.test(x.stdout) && !/^(sshd|ssh)$/i.test(owner), node: /N=True/.test(x.stdout), owner };
 }
 export async function remoteLog(c: core.Config, r: core.Remote, name: string): Promise<string> {
   if (!PROG_RE.test(name)) throw new Error('bad name');
@@ -327,7 +330,7 @@ export async function testProgram(c: core.Config, r: core.Remote, name: string):
   if (p.mode === 'remote') {
     const s = await remoteState(c, r, p).catch(() => null);
     add('remote supervisor is running', !!s?.supervisor, s ? String(s.supervisor) : 'remote unreachable');
-    add('program answers on the remote', !!s?.portUp, `127.0.0.1:${p.port} on the remote`);
+    add('program answers on the remote', !!s?.portUp, `127.0.0.1:${p.port} on the remote` + (s?.owner ? ` (held by ${s.owner})` : ''));
     add('localhost forward answers here', (await core.tcpProbe('127.0.0.1', p.port, 2000)).ok, `127.0.0.1:${p.port}`);
   } else add('runs on this PC', true, 'not moved');
   return out;

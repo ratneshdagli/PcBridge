@@ -136,7 +136,9 @@ export function wantedLinks(c: core.Config, d: Pick<AppDeps, 'where' | 'ports'>)
     const locs = a.members.map((m) => d.where(m)); const pcs = [...new Set(locs.filter((l) => l !== HERE))]; if (new Set(locs).size < 2) continue;
     a.members.forEach((m, i) => { for (const pc of pcs) if (pc !== locs[i]) for (const port of d.ports(m)) out.set(pc + ':' + port, { pc, port }); });
   }
-  for (const p of c.programs || []) { if (!p.needs?.length) continue; const pc = d.where({ kind: 'program', name: p.name }); if (pc !== HERE) for (const port of p.needs) out.set(pc + ':' + port, { pc, port }); }   // a moved program that still needs something on THIS PC (e.g. LM Studio)
+  // a moved program that still needs something on THIS PC (e.g. LM Studio). Skip a port whose owner program now runs on that same PC: it is local there, and a link would squat on the port.
+  const ownerAt = (pc: string, port: number, except: string) => (c.programs || []).some((q) => q.name !== except && q.port === port && d.where({ kind: 'program', name: q.name }) === pc);
+  for (const p of c.programs || []) { if (!p.needs?.length) continue; const pc = d.where({ kind: 'program', name: p.name }); if (pc !== HERE) for (const port of p.needs) if (!ownerAt(pc, port, p.name)) out.set(pc + ':' + port, { pc, port }); }
   return [...out.values()];
 }
 const linkId = (c: core.Config, l: Link) => -(1000 + Math.max(0, c.remotes.findIndex((r) => r.name === l.pc)) * 70000 + l.port);
