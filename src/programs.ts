@@ -269,6 +269,7 @@ export async function moveProgram(c: core.Config, r: core.Remote, name: string, 
   const startedAt = Date.now();
   try {
     core.log('info', `[program ${name}] 1/5 preparing ${root(c)} on the remote`); await prepareRemote(c, r);
+    await remoteStop(c, r, p).catch(() => 0);   // a stale copy still running there (after a failover or a crash loop) locks its venv and files
     // hand-copied folder: an empty file named .pcb-preseeded inside <root>\apps\<name> on the other PC means "already there"; used once, then removed
     let copied = ''; const mark = `${root(c)}\\apps\\${p.name}\\.pcb-preseeded`;
     const seeded = await core.psRemote(r, ps(c, `if(Test-Path -LiteralPath "${mark}"){ Remove-Item -LiteralPath "${mark}" -Force; 'seeded' } else { 'no' }`), { timeout: 60000 });

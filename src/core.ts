@@ -114,6 +114,7 @@ export function saveConfig(file: string, c: Config) {
   fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);              // atomic: a crash never leaves half a config
   // read it back: a save that did not land must be loud, because a restart would silently lose every program and app
+  log('info', `config saved: ${file} (${Buffer.byteLength(text)} bytes)`, true);
   if (fs.readFileSync(file, 'utf8') !== text) throw new Error(`The config was written but ${file} does not contain it. Programs and apps would be lost on restart.`);
 }
 
