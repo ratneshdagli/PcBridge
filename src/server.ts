@@ -236,7 +236,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['test:balance'] = (name: string, n?: number) => setup.testBalance(tctx(), name, n);
   H['test:port'] = (p: number) => setup.testPort(p);
   // ---- plain programs (Node / Python / anything): copy to the remote's E: drive, run supervised, forward the port ----
-  const pdeps = (): programs.ProgramDeps => ({ fwd, save: () => core.saveConfig(cfgFile, config), localPidOnPort: (n) => core.pidOnPort(n) });
+  const pdeps = (): programs.ProgramDeps => ({ fwd, save: () => core.saveConfig(cfgFile, config), localPidOnPort: (n) => core.pidOnPort(n), relink: () => { try { apps.syncLinks(config, adeps(), fwd); } catch (e: any) { core.log('err', 'app links: ' + e.message); } } });
   const rp = (p: { remote?: string }) => core.remoteFor(config, p.remote);
   const prog = (name: string) => { const p = (config.programs || []).find((x) => x.name === name); if (!p) throw new Error(`Unknown program "${name}"`); return p; };
   H['programs:list'] = async () => { const list = config.programs || []; return Promise.all(list.map(async (p) => ({ ...p, pc: rp(p).name, live: p.mode === 'remote' ? await programs.remoteState(config, rp(p), p).catch(() => null) : null, holder: p.mode === 'remote' ? null : await core.pidOnPort(p.port).catch(() => null) }))); };

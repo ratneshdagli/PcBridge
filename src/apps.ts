@@ -130,7 +130,8 @@ export async function testApp(c: core.Config, d: AppDeps, name: string): Promise
 
 // ---- links between members on different PCs ----
 export interface Link { pc: string; port: number }
-export function wantedLinks(c: core.Config, d: Pick<AppDeps, 'where' | 'ports'>): Link[] {
+export function wantedLinks(c: core.Config, d0: Pick<AppDeps, 'where' | 'ports'>): Link[] {
+  const d = { ...d0, where: (m: AppMember) => (m.kind === 'program' && core.movingTo.get(m.name)) || d0.where(m) };   // a program mid-move already counts as on its target
   const out = new Map<string, Link>();
   for (const a of c.apps || []) {
     const locs = a.members.map((m) => d.where(m)); const pcs = [...new Set(locs.filter((l) => l !== HERE))]; if (new Set(locs).size < 2) continue;

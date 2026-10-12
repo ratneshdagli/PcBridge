@@ -254,7 +254,7 @@ export async function remoteLog(c: core.Config, r: core.Remote, name: string): P
   return x.stdout.replace(/#< CLIXML[\s\S]*/, '').trim();
 }
 
-export interface ProgramDeps { fwd: core.Forwarder; save: () => void; localPidOnPort: (port: number) => Promise<number | null> }
+export interface ProgramDeps { fwd: core.Forwarder; save: () => void; localPidOnPort: (port: number) => Promise<number | null>; relink?: () => void }
 /** Move: prepare remote, copy, npm install (if package.json), start under the supervisor, wait for the port, forward localhost:port. Rolls back to "local" on failure. */
 export async function moveProgram(c: core.Config, r: core.Remote, name: string, d: ProgramDeps, stopLocalPid?: number): Promise<string> {
   const p = (c.programs || []).find((x) => x.name === name); if (!p) throw new Error(`Unknown program "${name}"`);
@@ -295,13 +295,16 @@ if($c -eq 0){ & "$root\\tools\\node\\npm.cmd" run --if-present postinstall 2>&1 
 exit $c`), { timeout: 900000, stream: true });
       if (x.code !== 0) throw fail('npm install failed', x);
     }
+    // the program now counts as being on the target: drop any reverse link that holds its port there, or it could never bind
+    core.movingTo.set(name, r.name); d.relink?.(); await new Promise((res) => setTimeout(res, 1500));
     core.log('info', `[program ${name}] 4/5 starting on the remote`); await remoteStart(c, r, p);
     let up = false; for (let i = 0; i < 40 && !up; i++) { up = (await remoteState(c, r, p)).portUp; if (!up) await new Promise((res) => setTimeout(res, 1500)); }
     if (!up) throw new Error(`It started but nothing answers on port ${p.port} on the remote. Log:\n` + (await remoteLog(c, r, p.name).catch(() => '')).split('\n').slice(-8).join('\n'));
     core.log('info', `[program ${name}] 5/5 forwarding localhost:${p.port}`); await d.fwd.start(r, { name: p.name, localPort: p.port, remotePort: p.port, remoteHost: '127.0.0.1' });
     for (let i = 0; i < 20 && (await core.tcpProbe('127.0.0.1', p.port, 800)).ok === false; i++) await new Promise((res) => setTimeout(res, 400));
-    p.mode = 'remote'; p.remote = r.name; p.synced = startedAt; d.save(); return `${name} now runs on ${r.name} (${root(c)}\\apps\\${name}); localhost:${p.port} goes there${seeded.stdout.includes('seeded') ? '' : '; copied over ' + copied}`;
+    p.mode = 'remote'; p.remote = r.name; p.synced = startedAt; d.save(); core.movingTo.delete(name); d.relink?.(); return `${name} now runs on ${r.name} (${root(c)}\\apps\\${name}); localhost:${p.port} goes there${seeded.stdout.includes('seeded') ? '' : '; copied over ' + copied}`;
   } catch (e) {
+    core.movingTo.delete(name); d.relink?.();   // failed: the links that were dropped come back
     d.fwd.stop(p.port); await remoteStop(c, r, p).catch(() => 0);
     if (holder) core.log('err', `[program ${name}] failed; the local process I stopped (${holder}) is NOT restarted automatically - start it yourself or press "Bring back"`);
     throw e;

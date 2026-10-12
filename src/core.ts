@@ -119,6 +119,8 @@ export function saveConfig(file: string, c: Config) {
 
 // ---------- command log ----------
 export interface LogEntry { t: number; kind: 'cmd' | 'out' | 'err' | 'info'; poll: boolean; msg: string }
+/** Programs that are being moved right now: name -> target PC. App links treat them as already there, so a reverse link cannot hold their port on the target while they start. */
+export const movingTo = new Map<string, string>();
 export const logs: LogEntry[] = [];
 let logListener: ((e: LogEntry) => void) | null = null;
 export const onLog = (fn: (e: LogEntry) => void) => { logListener = fn; };
