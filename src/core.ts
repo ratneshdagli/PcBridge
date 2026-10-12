@@ -110,8 +110,11 @@ export function loadConfig(file: string): { config: Config; warning?: string } {
 export function saveConfig(file: string, c: Config) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(c, null, 2));
+  const text = JSON.stringify(c, null, 2);
+  fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);              // atomic: a crash never leaves half a config
+  // read it back: a save that did not land must be loud, because a restart would silently lose every program and app
+  if (fs.readFileSync(file, 'utf8') !== text) throw new Error(`The config was written but ${file} does not contain it. Programs and apps would be lost on restart.`);
 }
 
 // ---------- command log ----------
