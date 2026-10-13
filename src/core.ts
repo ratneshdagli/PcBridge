@@ -296,8 +296,11 @@ const STATUS_PS = String.raw`
 $ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'
 $o=@{}; $os=Get-CimInstance Win32_OperatingSystem
 $o.host=$env:COMPUTERNAME
-$o.cpu=[int]((Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average)
-$o.ramTotalMB=[int]($os.TotalVisibleMemorySize/1024); $o.ramFreeMB=[int]($os.FreePhysicalMemory/1024)
+$u=(Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'").PercentProcessorUtility   # what Task Manager shows (frequency-scaled), not the older time-based LoadPercentage
+if($null -eq $u){ $u=(Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
+$o.cpu=[int][math]::Min(100,[double]$u)
+$av=(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes   # available = free + standby cache, like Task Manager's "in use"
+$o.ramTotalMB=[int]($os.TotalVisibleMemorySize/1024); $o.ramFreeMB=$(if($av){[int]$av}else{[int]($os.FreePhysicalMemory/1024)})
 $o.disks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | % { @{id=$_.DeviceID; freeGB=[math]::Round($_.FreeSpace/1GB,1); totalGB=[math]::Round($_.Size/1GB,1)} })
 $o.gpuNames=@(Get-CimInstance Win32_VideoController | % Name)
 $o.nvidia=''; $nv=@("$env:windir\System32\nvidia-smi.exe",'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe') | ? { Test-Path $_ } | select -First 1
@@ -372,6 +375,18 @@ function localCpuPct(): number {
   prevCpu = cur.map((c) => ({ ...c.times }));
   return total > 0 ? Math.max(0, Math.min(100, Math.round(100 * (1 - idle / total)))) : 0;
 }
+/** Task Manager's CPU number is "% Processor Utility" (scaled by clock speed); os.cpus() only has time-based usage, which reads far higher when the CPU runs below full clock.
+ *  typeperf is a tiny native exe; sampled in the background, os.cpus() is the fallback (other Windows languages name the counter differently). */
+let utilCache: { t: number; v?: number; busy: boolean } = { t: 0, busy: false };
+function refreshCpuUtility() {
+  if (utilCache.busy || Date.now() - utilCache.t < 4000) return;
+  utilCache.busy = true;
+  run('typeperf', ['\\Processor Information(_Total)\\% Processor Utility', '-sc', '2'], { timeout: 6000, poll: true }).then((x) => {
+    const rows = x.stdout.split('\n').map((l) => l.trim().split('","')).filter((r) => r.length === 2 && /^[\d.]+"?$/.test(r[1]));
+    const v = rows.length ? parseFloat(rows[rows.length - 1][1]) : NaN;
+    utilCache = { t: Date.now(), v: Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined, busy: false };
+  }, () => { utilCache = { t: Date.now(), v: undefined, busy: false }; });
+}
 let gpuCache: { t: number; names: string[]; nvidia?: string } = { t: 0, names: [] };
 export async function localMetrics(): Promise<NonNullable<Status['metrics']>> {
   const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
@@ -387,7 +402,8 @@ export async function localMetrics(): Promise<NonNullable<Status['metrics']>> {
     gpuCache = { t: Date.now(), names: [], nvidia: x.code === 0 && x.stdout.trim() ? x.stdout.trim().split('\n')[0].replace(/\r/g, '').split(',').map((v) => v.trim()).join(',') : undefined };
   }
   const total = Math.round(os.totalmem() / 1048576);
-  return { host: os.hostname(), cpu: localCpuPct(), ramTotalMB: total, ramUsedMB: total - Math.round(os.freemem() / 1048576), disks, gpuNames: gpuCache.names, nvidia: gpuCache.nvidia };
+  const timeBased = localCpuPct(); refreshCpuUtility();
+  return { host: os.hostname(), cpu: utilCache.v ?? timeBased, ramTotalMB: total, ramUsedMB: total - Math.round(os.freemem() / 1048576), disks, gpuNames: gpuCache.names, nvidia: gpuCache.nvidia };
 }
 
 /** One real HTTP request through a local port: proves the forward reaches a live service. */
