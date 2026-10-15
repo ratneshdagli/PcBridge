@@ -258,7 +258,15 @@ export interface Status {
   context: string; contextIsRemote: boolean;
 }
 
+let tsCache: { t: number; host: string; v: Status['tailscale'] } | undefined;
+/** `tailscale status --json` is a process plus a big JSON parse: an "online" answer is reused for 10 s, anything else is always re-checked. */
 export async function tailscaleState(r: Remote): Promise<Status['tailscale']> {
+  if (tsCache && tsCache.host === r.host && Date.now() - tsCache.t < 10000) return tsCache.v;
+  const v = await tailscaleLive(r);
+  tsCache = v.state === 'online' ? { t: Date.now(), host: r.host, v } : undefined;
+  return v;
+}
+async function tailscaleLive(r: Remote): Promise<Status['tailscale']> {
   const x = await run('tailscale', ['status', '--json'], { timeout: 5000, poll: true });
   if (x.code !== 0) return { state: 'unknown', detail: 'tailscale CLI failed: ' + (x.stderr || (x.timedOut ? 'timeout' : 'unknown error')).split('\n')[0] };
   try {
@@ -336,6 +344,10 @@ export const dkSpec = (args: string[]) => (process.env.PCB_FAKE_DOCKER ? { cmd: 
 export function dk(args: string[], opt?: RunOpt): Promise<RunResult> { const s = dkSpec(args); return run(s.cmd, s.args, opt); }
 
 export async function dockerContext(): Promise<string> {
+  if (!process.env.PCB_FAKE_DOCKER) {   // docker's own rule (env, else config.json), read directly: no process per poll
+    if (process.env.DOCKER_CONTEXT) return process.env.DOCKER_CONTEXT;
+    try { return JSON.parse(fs.readFileSync(path.join(process.env.DOCKER_CONFIG || path.join(os.homedir(), '.docker'), 'config.json'), 'utf8')).currentContext || 'default'; } catch { /* no config: ask docker */ }
+  }
   const x = await dk(['context', 'show'], { timeout: 5000, poll: true });
   return x.code === 0 ? x.stdout.trim() : '?';
 }
@@ -377,15 +389,21 @@ function localCpuPct(): number {
 }
 /** Task Manager's CPU number is "% Processor Utility" (scaled by clock speed); os.cpus() only has time-based usage, which reads far higher when the CPU runs below full clock.
  *  typeperf is a tiny native exe; sampled in the background, os.cpus() is the fallback (other Windows languages name the counter differently). */
-let utilCache: { t: number; v?: number; busy: boolean } = { t: 0, busy: false };
-function refreshCpuUtility() {
-  if (utilCache.busy || Date.now() - utilCache.t < 4000) return;
-  utilCache.busy = true;
-  run('typeperf', ['\\Processor Information(_Total)\\% Processor Utility', '-sc', '2'], { timeout: 6000, poll: true }).then((x) => {
-    const rows = x.stdout.split('\n').map((l) => l.trim().split('","')).filter((r) => r.length === 2 && /^[\d.]+"?$/.test(r[1]));
-    const v = rows.length ? parseFloat(rows[rows.length - 1][1]) : NaN;
-    utilCache = { t: Date.now(), v: Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined, busy: false };
-  }, () => { utilCache = { t: Date.now(), v: undefined, busy: false }; });
+let utilV: number | undefined, utilAt = 0, utilProc: ChildProcess | undefined, utilNext = 0;
+/** One long-lived typeperf (a sample every 3 s) instead of a new process per poll. If it exits (counter missing), retry after a minute. */
+function cpuUtility(): number | undefined {
+  if (!utilProc && Date.now() >= utilNext) {
+    utilNext = Date.now() + 60000;
+    try {
+      const p = utilProc = spawn('typeperf', ['\\Processor Information(_Total)\\% Processor Utility', '-si', '3'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      let buf = '';
+      p.stdout!.on('data', (d: Buffer) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const r = buf.slice(0, i).trim().split('","'); buf = buf.slice(i + 1); const v = r.length === 2 ? parseFloat(r[1]) : NaN; if (Number.isFinite(v)) { utilV = Math.max(0, Math.min(100, Math.round(v))); utilAt = Date.now(); } } });
+      const gone = () => { if (utilProc === p) utilProc = undefined; };
+      p.on('error', gone); p.on('exit', gone);
+      process.once('exit', () => p.kill());
+    } catch { utilProc = undefined; }
+  }
+  return Date.now() - utilAt < 15000 ? utilV : undefined;
 }
 let gpuCache: { t: number; names: string[]; nvidia?: string } = { t: 0, names: [] };
 export async function localMetrics(): Promise<NonNullable<Status['metrics']>> {
@@ -397,13 +415,13 @@ export async function localMetrics(): Promise<NonNullable<Status['metrics']>> {
       return total > 0 ? { id: l + ':', freeGB: Math.round(free / 1e8) / 10, totalGB: Math.round(total / 1e8) / 10 } : null;
     } catch { return null; }
   }))).filter((d): d is { id: string; freeGB: number; totalGB: number } => !!d);
-  if (Date.now() - gpuCache.t > 6000) {
+  if (Date.now() - gpuCache.t > 15000) {
     const x = await run('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 4000, poll: true });
     gpuCache = { t: Date.now(), names: [], nvidia: x.code === 0 && x.stdout.trim() ? x.stdout.trim().split('\n')[0].replace(/\r/g, '').split(',').map((v) => v.trim()).join(',') : undefined };
   }
   const total = Math.round(os.totalmem() / 1048576);
-  const timeBased = localCpuPct(); refreshCpuUtility();
-  return { host: os.hostname(), cpu: utilCache.v ?? timeBased, ramTotalMB: total, ramUsedMB: total - Math.round(os.freemem() / 1048576), disks, gpuNames: gpuCache.names, nvidia: gpuCache.nvidia };
+  const timeBased = localCpuPct();
+  return { host: os.hostname(), cpu: cpuUtility() ?? timeBased, ramTotalMB: total, ramUsedMB: total - Math.round(os.freemem() / 1048576), disks, gpuNames: gpuCache.names, nvidia: gpuCache.nvidia };
 }
 
 /** One real HTTP request through a local port: proves the forward reaches a live service. */
