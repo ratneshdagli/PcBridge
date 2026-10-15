@@ -189,18 +189,24 @@ function copyBack(c: core.Config, r: core.Remote, p: Program): Promise<void> {
 
 /** Send only some files of a moved program to its PC (no full copy, no reinstall, no restart unless asked). files = paths relative to the program's folder;
  *  without it: every file changed since the last copy or push. dependencies (node_modules, .venv) and syncExcludes are never sent. */
-export async function pushFiles(c: core.Config, r: core.Remote, name: string, d: ProgramDeps, files?: string[], restart?: boolean): Promise<string> {
+/** A file to push: a path inside the program's folder on this PC, or the content itself ({ path, content, base64? }) so the local folder need not exist. */
+export type PushFile = string | { path: string; content: string; base64?: boolean };
+export async function pushFiles(c: core.Config, r: core.Remote, name: string, d: ProgramDeps, files?: PushFile[], restart?: boolean): Promise<string> {
   const p = (c.programs || []).find((x) => x.name === name); if (!p) throw new Error(`No program named "${name}"`);
   if (p.mode !== 'remote') throw new Error(`${name} runs on this PC: there is nothing to push`);
   const base = path.resolve(p.dir), skip = new Set([...c.syncExcludes, '.venv', 'node_modules']), started = Date.now();
-  let list: string[] = [];
+  let list: string[] = []; const inline = new Map<string, Buffer>();
   if (files && files.length) {
     for (const f of files) {
-      const full = path.resolve(base, String(f)); const rel = path.relative(base, full);
-      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`"${f}" is not inside the program's folder`);
-      if (rel.split(path.sep).some((s) => skip.has(s))) throw new Error(`"${f}" is in an excluded folder (${[...skip].join(', ')})`);
-      if (!fs.existsSync(full) || !fs.statSync(full).isFile()) throw new Error(`"${f}" is not a file in ${p.dir}`);
-      list.push(rel.split(path.sep).join('/'));
+      const given = typeof f === 'string' ? f : f?.path;
+      if (typeof given !== 'string' || !given) throw new Error('each entry of "files" must be a path string or { "path", "content", "base64"? }');
+      const full = path.resolve(base, given); const rel = path.relative(base, full);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`"${given}" is not inside the program's folder`);
+      if (rel.split(path.sep).some((s) => skip.has(s))) throw new Error(`"${given}" is in an excluded folder (${[...skip].join(', ')})`);
+      const posix = rel.split(path.sep).join('/');
+      if (typeof f !== 'string') { if (typeof f.content !== 'string') throw new Error(`"${given}": "content" must be a string`); inline.set(posix, Buffer.from(f.content, f.base64 ? 'base64' : 'utf8')); }
+      else if (!fs.existsSync(full) || !fs.statSync(full).isFile()) throw new Error(`"${given}" is not a file in ${p.dir}` + (fs.existsSync(base) ? '' : ' (that folder no longer exists on this PC: send the file as { "path", "content" } instead)'));
+      list.push(posix);
     }
   } else {
     if (!p.synced) throw new Error(`${name} was moved before PC Bridge recorded when it was last copied: pass "files" (paths relative to its folder). After one push, "push" without files works.`);
@@ -210,19 +216,29 @@ export async function pushFiles(c: core.Config, r: core.Remote, name: string, d:
   }
   if (!list.length) return `${name}: nothing changed since the last copy`;
   if (list.length > 5000) throw new Error(`${list.length} files changed: send the whole program again instead`);
-  const dest = `${root(c)}\\apps\\${name}`, lf = path.join(os.tmpdir(), `pcb-push-${process.pid}-${started}.txt`);
+  const dest = `${root(c)}\\apps\\${name}`, lf = path.join(os.tmpdir(), `pcb-push-${process.pid}-${started}.txt`), stage = path.join(os.tmpdir(), `pcb-stage-${process.pid}-${started}`);
   fs.writeFileSync(lf, list.join('\n') + '\n');
+  let from = base;
   try {
+    if (inline.size) {   // content sent by the caller: gather everything in one temp folder so a single tar covers inline and on-disk files
+      from = stage;
+      for (const rel of list) { const t = path.join(stage, rel); fs.mkdirSync(path.dirname(t), { recursive: true }); const b = inline.get(rel); if (b) fs.writeFileSync(t, b); else fs.copyFileSync(path.join(base, rel), t); }
+    }
     const { sargs, ms, sx } = await bulkArgs(r);
-    const line = `tar -czf - -C ${cq(base)} -T ${cq(lf)} | ${sx} ${sargs.map(cq).join(' ')} tar -xzf - -C ${dest}`;
+    const line = `tar -czf - -C ${cq(from)} -T ${cq(lf)} | ${sx} ${sargs.map(cq).join(' ')} tar -xzf - -C ${dest}`;
     core.log('cmd', `$ ${line}`);
     const { code, err } = await runPipeline(line, Math.max(ms, 600000), 'push');
     if (code !== 0) throw new Error('push failed: ' + (err.trim().split('\n')[0] || 'exit ' + code));
-  } finally { try { fs.unlinkSync(lf); } catch { /* temp file already gone */ } }
+  } finally { try { fs.unlinkSync(lf); } catch { /* temp file already gone */ } if (inline.size) fs.rmSync(stage, { recursive: true, force: true }); }
   p.synced = started; d.save();
-  if (restart) await remoteStart(c, r, p);
-  core.log('info', `[program ${name}] pushed ${list.length} file(s) to ${r.name}${restart ? ' and restarted it' : ''}`);
-  return `${name}: ${list.length} file(s) sent to ${r.name}${restart ? ', program restarted' : ' (not restarted)'}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
+  let health = '';
+  if (restart) {   // report whether it came back, so callers do not have to poll
+    await remoteStart(c, r, p);
+    let up = false; for (let i = 0; i < 20 && !up; i++) { up = (await remoteState(c, r, p)).portUp; if (!up) await new Promise((res) => setTimeout(res, 1500)); }
+    health = up ? `; answering again on port ${p.port}` : `; BUT nothing answers on port ${p.port} 30 s after the restart (see the program's log)`;
+  }
+  core.log('info', `[program ${name}] pushed ${list.length} file(s) to ${r.name}${restart ? ' and restarted it' + health : ''}`);
+  return `${name}: ${list.length} file(s) sent to ${r.name}${restart ? ', program restarted' + health : ' (not restarted)'}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
 }
 
 const spec =(c: core.Config, p: Program) => Buffer.from(JSON.stringify({ name: p.name, dir: `${root(c)}\\apps\\${p.name}`, cmd: p.cmd, env: p.env || {}, log: `${root(c)}\\logs\\${p.name}.log`, runDir: `${root(c)}\\run`, nodeDir: `${root(c)}\\tools\\node`, venv: runtimeOf(p) === 'python' ? `${root(c)}\\apps\\${p.name}\\.venv\\Scripts` : '', tmp: `${root(c)}\\tmp`, npmCache: `${root(c)}\\npm-cache` })).toString('base64');

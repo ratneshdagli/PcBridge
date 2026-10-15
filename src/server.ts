@@ -15,6 +15,18 @@ import { PublicApi, newToken, defaultApi } from './publicapi';
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
 const cfgFile = path.join(dataDir, 'config.json'), svcFile = path.join(dataDir, 'service.json'), trayFile = path.join(dataDir, 'tray.txt');
 const uiDir = process.env.PCB_UI || path.join(__dirname, '..', '..', 'renderer');
+/** Runs on the other PC for POST /net/check: DNS answer + N GETs per address, that PC's DNS servers and system proxy. Addresses arrive base64 (one per line), never spliced into the script. */
+const NET_CHECK_PS = String.raw`$ProgressPreference='SilentlyContinue'
+$urls=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%URLS%')) -split '\r?\n' | ?{ $_ }); $n=%N%
+$res=foreach($u in $urls){
+  $h=([uri]$u).Host; try{ $dns=(([Net.Dns]::GetHostAddresses($h) | select -First 3 | %{ $_.IPAddressToString }) -join ',') }catch{ $dns='FAILED: '+$_.Exception.Message }
+  $t=@(1..$n | %{ $sw=[Diagnostics.Stopwatch]::StartNew()
+    try{ $x=Invoke-WebRequest $u -UseBasicParsing -TimeoutSec 6; ''+[int]$x.StatusCode+' '+$sw.ElapsedMilliseconds+'ms' }
+    catch{ if($_.Exception.Response){ ''+[int]$_.Exception.Response.StatusCode+' '+$sw.ElapsedMilliseconds+'ms' } else { 'ERR '+(([string]$_.Exception.Message -split '[\r\n]')[0]) } } })
+  [pscustomobject]@{ url=$u; dns=$dns; tries=$t } }
+$srv=@(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ?{ $_.ServerAddresses } | %{ $_.ServerAddresses } | select -Unique)
+$px=((netsh winhttp show proxy) -join ' ').Trim()
+'__NET__'+(ConvertTo-Json -Compress -Depth 4 ([pscustomobject]@{ pc=$env:COMPUTERNAME; dnsServers=$srv; winhttpProxy=$px; results=@($res) }))`;
 const token = crypto.randomBytes(24).toString('hex');
 fs.mkdirSync(dataDir, { recursive: true });
 
@@ -254,7 +266,18 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['programs:update'] = async (apply: boolean) => { const pcs = [...new Set([remote(), ...(config.programs || []).filter((p) => p.mode === 'remote').map(rp)])]; const rows: programs.UpdateRow[] = []; for (const r of pcs) for (const x of await programs.updateRemote(config, r, pdeps(), apply === true)) rows.push(pcs.length > 1 ? { ...x, name: `[${r.name}] ${x.name}` } : x); refresh(); return rows; };
   H['programs:autoupdate'] = (on: boolean) => { config.autoUpdate = on === true; persist(); return config.autoUpdate; };
   H['programs:logs'] = (name: string) => programs.remoteLog(config, rp(prog(name)), name);
-  H['programs:push'] = (name: string, files?: string[], restart?: boolean) => programs.pushFiles(config, rp(prog(name)), name, pdeps(), Array.isArray(files) ? files : undefined, restart === true);
+  H['programs:push'] = (name: string, files?: programs.PushFile[], restart?: boolean) => programs.pushFiles(config, rp(prog(name)), name, pdeps(), Array.isArray(files) ? files : undefined, restart === true);
+  H['net:check'] = async (urls: unknown, program?: string, tries?: number) => {   // read-only: DNS + a few GETs from the other PC, to find flaky outbound internet
+    const list = (Array.isArray(urls) ? urls : []).map(String);
+    if (!list.length || list.length > 8) throw new Error('urls: give 1 to 8 web addresses');
+    for (const u of list) { let x: URL; try { x = new URL(u); } catch { throw new Error(`"${u}" is not a web address`); } if (!/^https?:$/.test(x.protocol)) throw new Error(`"${u}": only http(s) addresses`); }
+    const n = Math.min(4, Math.max(1, Math.floor(Number(tries)) || 3)), r = program ? rp(prog(program)) : remote();
+    const script = NET_CHECK_PS.replace('%URLS%', Buffer.from(list.join('\n')).toString('base64')).replace('%N%', String(n));
+    const x = await core.psRemote(r, script, { timeout: 30000 + list.length * n * 7000 });
+    const line = x.stdout.split('\n').find((l) => l.startsWith('__NET__'));
+    if (!line) throw new Error(`${r.name}: no answer (${(x.stderr || (x.timedOut ? 'timed out' : 'exit ' + x.code)).split('\n')[0]})`);
+    return JSON.parse(line.trim().slice(7));
+  };
   H['test:program'] = (name: string) => programs.testProgram(config, rp(prog(name)), name);
   // ---- apps: groups of programs/containers moved as one ----
   const projOf = (m: apps.AppMember) => config.projects.find((x) => x.container === m.name || (m.project !== undefined && x.name === m.project));
