@@ -68,7 +68,7 @@ function main() {
   // ---- tray (opt-in with --tray, PowerShell NotifyIcon; a compiled helper exe gets quarantined by Defender). Colour/tooltip go through tray.txt; menu clicks come back on stdout. ----
   let tray: ChildProcess | null = null;
   const paintTray = (s: core.Status | null) => {
-    const ok = s?.ssh.ok; const txt = !s ? 'grey|PC Bridge: checking…' : ok ? `green|PC Bridge: ${remote().name} online (${s.ssh.latencyMs} ms)` : `red|PC Bridge: ${remote().name} OFFLINE`;
+    const ok = s?.ssh.ok; const txt = !s ? 'grey|PC Bridge: checking…' : ok ? `green|PC Bridge: ${remote().name} online (${s.ssh.latencyMs} ms)` : s.tailscale.scope === 'local' ? 'red|PC Bridge: Tailscale on this PC is disconnected' : `red|PC Bridge: ${remote().name} unreachable`;
     try { fs.writeFileSync(trayFile, txt); } catch { /* tray is cosmetic */ }
   };
   function startTray() {
@@ -110,7 +110,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
       autoDone = true;
       for (const f of config.forwards.filter((x) => x.autoStart)) fwd.start(remote(), f).catch((e) => core.log('err', `auto-start forward ${f.localPort}: ${e.message}`));
     }
-    if (last && last.ssh.ok !== s.ssh.ok) core.log('info', s.ssh.ok ? 'Remote came ONLINE' : 'Remote went OFFLINE: ' + (s.ssh.headline ?? s.ssh.error));
+    if (last && (last.ssh.ok !== s.ssh.ok || last.ssh.headline !== s.ssh.headline)) core.log('info', s.ssh.ok ? 'Remote came ONLINE' : 'Connection unavailable: ' + (s.ssh.headline ?? s.ssh.error));
     last = s; send('status', s); paintTray(s);
     keepOthersAwake(); probeOthers().catch(() => 0);
     if (config.apps?.length || config.programs?.some((p) => p.needs?.length) || apps.hasLinks()) try { apps.syncLinks(config, adeps(), fwd); } catch (e: any) { core.log('err', 'app links: ' + e.message); }
