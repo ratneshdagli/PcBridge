@@ -249,7 +249,7 @@ export interface Container { name: string; image: string; status: string; state:
 export interface Status {
   ts: number;
   route?: { host: string; primary: boolean; candidates: { host: string; ms: number | null }[] };
-  tailscale: { state: 'online' | 'offline' | 'unknown'; detail: string };
+  tailscale: { state: 'online' | 'offline' | 'unknown'; detail: string; scope?: 'local' | 'remote' };
   ssh: { ok: boolean; latencyMs: number | null; error?: string; headline?: string; checklist?: string[] };
   metrics?: { host: string; cpu: number; ramUsedMB: number; ramTotalMB: number; disks: { id: string; freeGB: number; totalGB: number }[]; gpuNames: string[]; nvidia?: string };
   docker?: { wslRunning: boolean; daemonUp: boolean; error?: string; containers: Container[] };
@@ -270,14 +270,20 @@ async function tailscaleLive(r: Remote): Promise<Status['tailscale']> {
   const x = await run('tailscale', ['status', '--json'], { timeout: 5000, poll: true });
   if (x.code !== 0) return { state: 'unknown', detail: 'tailscale CLI failed: ' + (x.stderr || (x.timedOut ? 'timeout' : 'unknown error')).split('\n')[0] };
   try {
-    const j = JSON.parse(x.stdout);
-    if (j.BackendState && j.BackendState !== 'Running') return { state: 'offline', detail: `This PC's Tailscale is ${j.BackendState}` };
-    const peers: any[] = Object.values(j.Peer || {});
-    const p = peers.find((q) => (q.TailscaleIPs || []).includes(r.host) || String(q.HostName).toLowerCase() === r.host.toLowerCase() || String(q.DNSName).toLowerCase().startsWith(r.host.toLowerCase() + '.'));
-    if (!p) return { state: 'unknown', detail: `${r.host} is not in this tailnet's peer list (not a Tailscale address?)` };
-    return p.Online ? { state: 'online', detail: `${p.HostName} online${p.CurAddr ? ' (direct)' : p.Relay ? ' (relay ' + p.Relay + ')' : ''}` }
-      : { state: 'offline', detail: `${p.HostName} offline${p.LastSeen ? ', last seen ' + p.LastSeen : ''}` };
+    return parseTailscaleStatus(JSON.parse(x.stdout), r.host);
   } catch (e: any) { return { state: 'unknown', detail: 'could not parse tailscale output: ' + e.message }; }
+}
+/** Separate local connectivity failures from a peer that is reported offline. */
+export function parseTailscaleStatus(j: any, host: string): Status['tailscale'] {
+    const health = Array.isArray(j.Health) ? j.Health.filter((h: unknown) => typeof h === 'string').join('; ') : '';
+    if ((j.BackendState && j.BackendState !== 'Running') || j.Self?.Online === false) return {
+      state: 'offline', scope: 'local', detail: `This PC's Tailscale is ${j.BackendState || 'disconnected'}${health ? ': ' + health : ''}`,
+    };
+    const peers: any[] = Object.values(j.Peer || {});
+    const p = peers.find((q) => (q.TailscaleIPs || []).includes(host) || String(q.HostName).toLowerCase() === host.toLowerCase() || String(q.DNSName).toLowerCase().startsWith(host.toLowerCase() + '.'));
+    if (!p) return { state: 'unknown', detail: `${host} is not in this tailnet's peer list (not a Tailscale address?)` };
+    return p.Online ? { state: 'online', detail: `${p.HostName} online${p.CurAddr ? ' (direct)' : p.Relay ? ' (relay ' + p.Relay + ')' : ''}` }
+      : { state: 'offline', scope: 'remote', detail: `${p.HostName} offline${p.LastSeen ? ', last seen ' + p.LastSeen : ''}` };
 }
 
 const CHECKLIST = [
@@ -294,6 +300,10 @@ export function diagnoseSsh(err: string, ts: Status['tailscale']): { headline: s
   else if (/could not resolve|name or service|enotfound|getaddrinfo/.test(e)) h = 'Host name could not be resolved - check the host/IP in Settings';
   else if (/host key verification/.test(e)) h = 'Host key changed or unknown - verify the machine, then fix ~/.ssh/known_hosts';
   else if (/not found in path/.test(e)) h = 'The ssh program was not found (install the Windows "OpenSSH Client" feature)';
+  else if (ts.state === 'offline' && ts.scope === 'local') return {
+    headline: "This PC's Tailscale is disconnected - remote PC status is unknown",
+    checklist: [ts.detail, 'Check this PC is connected to the internet', 'Open Tailscale on this PC and check it is connected and logged in', 'If Tailscale remains stuck starting or disconnected, restart Tailscale on this PC, then check again'],
+  };
   else if (ts.state === 'offline') h = 'Remote PC is offline in Tailscale (asleep, shut down, or Tailscale stopped)';
   else if (/refused/.test(e)) h = 'Remote is reachable but sshd is not accepting connections (service stopped?)';
   else if (/timed out|timeout/.test(e)) h = 'Connection timed out (remote asleep/offline or Tailscale down)';
