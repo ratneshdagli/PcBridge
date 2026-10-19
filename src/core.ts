@@ -23,7 +23,13 @@ export interface Project {
   autoOffload?: boolean;     // keep it on the remote whenever the remote is healthy (offloads at start-up and after a failback)
   paused?: boolean;          // user clicked "Bring back to this PC": no automatic offload until they offload again
   remote?: string;           // NAME of the PC it runs on when moved (default: the active PC). Lets different sites live on different PCs.
+  pages?: string[];          // extra pages worth opening, as paths on its port (e.g. "/docs/try.html"); shown as clickable links
 }
+/** Page paths for the link lists: must start with / and stay a plain path (no scheme, no host, no spaces or control characters). */
+export const PAGE_RE = /^\/[\w\-./~%+@:=?&#,;!*()]*$/;
+export const pagesProblem = (name: string, pages: unknown): string | null =>
+  pages === undefined ? null : !Array.isArray(pages) || pages.length > 20 || pages.some((x) => typeof x !== 'string' || x.length > 200 || !PAGE_RE.test(x) || x.startsWith('//') || x.split(/[?#]/)[0].split('/').includes('..'))
+    ? `"${name}": pages must be a list of up to 20 paths starting with / (like /docs/try.html)` : null;
 /** The PC a site/program belongs to: its own `remote` if set and still configured, otherwise the active PC. */
 export const remoteFor = (c: Config, name?: string): Remote => (name && c.remotes.find((r) => r.name === name)) || c.remotes[c.activeRemote];
 export interface Config {
@@ -74,6 +80,7 @@ export function validateConfig(c: Config): string[] {
   e.push(...require('./programs').validatePrograms(c));
   e.push(...require('./apps').validateApps(c));
   for (const p of [...(c.projects || []), ...(c.programs || [])]) if (p.remote && !(c.remotes || []).some((r) => r.name === p.remote)) e.push(`"${p.name}" is set to run on "${p.remote}", but no PC with that name is configured`);
+  for (const p of [...(c.projects || []), ...(c.programs || [])]) { const pe = pagesProblem(p.name, p.pages); if (pe) e.push(pe); }
   const seen = new Set<number>();
   for (const f of c.forwards || []) {
     if (!Number.isInteger(f.localPort) || f.localPort < 1 || f.localPort > 65535) e.push(`Forward "${f.name}": local port invalid`);

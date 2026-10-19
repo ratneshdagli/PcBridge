@@ -24,6 +24,7 @@ export interface Program {
   requirements?: string;                // Python: install from this file of the folder (e.g. requirements.lock) instead of requirements.txt / pyproject.toml; if pyproject.toml exists the project itself is then added with --no-deps
   pullExcludes?: string[];              // folders (relative to the program's folder, e.g. "data") that "bring home", Quit and failover do NOT copy back from the other PC; pushing them still works
   requireFast?: boolean;                // the copy must go over the home network: refuse up front (nothing is copied) instead of crawling through Tailscale
+  pages?: string[];                     // extra pages to open on its port, as paths (e.g. "/docs/try.html"); shown as clickable links
   synced?: number;                      // ms timestamp of the last full copy or push to the other PC: "push" without a file list sends what changed after it
 }
 export const runtimeOf = (p: Program): 'node' | 'python' => p.runtime ?? (fs.existsSync(path.join(p.dir, 'package.json')) ? 'node' : fs.existsSync(path.join(p.dir, 'requirements.txt')) || fs.existsSync(path.join(p.dir, 'pyproject.toml')) || /^\s*(python|py|uv)\b/i.test(p.cmd) ? 'python' : 'node');

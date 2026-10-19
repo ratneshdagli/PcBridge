@@ -32,6 +32,7 @@ You have a laptop and a second PC (a desktop, a home server, an old machine with
 | **Failover** | The other PC stops answering for 3 polls and the program starts on your PC again. |
 | **Safe quit** | Close PC Bridge and things stay on the other PC for 10 minutes. Open it again to keep them there, otherwise they come back. |
 | **Push changes** | Edited a file? Send just that file to the program running on the other PC, no new copy, no restart. |
+| **Everything clickable** | Every port you see (containers, programs, apps, forwards, ports) opens `http://localhost:PORT` in one click, and you can save extra pages such as `/docs/try.html` per program. **Apps > All addresses** lists every link in one place (also `GET /api/v1/links`). |
 | **Ports** | Every listening port on this PC, who owns it, what it is for, whether the network can reach it. |
 | **Local API** | Loopback-only HTTP API with a token (off by default) so scripts and AI agents can read and control everything. OpenAPI + a built-in guide. |
 | **Test buttons everywhere** | One click runs every self test and tells you exactly what is wrong. |

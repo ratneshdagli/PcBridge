@@ -253,7 +253,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   const prog = (name: string) => { const p = (config.programs || []).find((x) => x.name === name); if (!p) throw new Error(`Unknown program "${name}"`); return p; };
   H['programs:list'] = async () => { const list = config.programs || []; return Promise.all(list.map(async (p) => ({ ...p, pc: rp(p).name, live: p.mode === 'remote' ? await programs.remoteState(config, rp(p), p).catch(() => null) : null, holder: p.mode === 'remote' ? null : await core.pidOnPort(p.port).catch(() => null) }))); };
   H['programs:add'] = (p: programs.Program) => {
-    const entry: programs.Program = { name: String(p.name), dir: String(p.dir), cmd: String(p.cmd), port: Number(p.port), mode: 'local', env: p.env, ...(p.runtime ? { runtime: p.runtime } : {}), ...(p.failover !== undefined ? { failover: !!p.failover } : {}), ...(p.needs?.length ? { needs: p.needs.map(Number) } : {}), ...(p.omitDev ? { omitDev: true } : {}), ...(p.ignoreScripts ? { ignoreScripts: true } : {}), ...(p.python ? { python: String(p.python) } : {}), ...(p.requirements ? { requirements: String(p.requirements) } : {}), ...(p.pullExcludes?.length ? { pullExcludes: p.pullExcludes.map(String) } : {}), ...(p.requireFast ? { requireFast: true } : {}) };
+    const entry: programs.Program = { name: String(p.name), dir: String(p.dir), cmd: String(p.cmd), port: Number(p.port), mode: 'local', env: p.env, ...(p.runtime ? { runtime: p.runtime } : {}), ...(p.failover !== undefined ? { failover: !!p.failover } : {}), ...(p.needs?.length ? { needs: p.needs.map(Number) } : {}), ...(p.omitDev ? { omitDev: true } : {}), ...(p.ignoreScripts ? { ignoreScripts: true } : {}), ...(p.python ? { python: String(p.python) } : {}), ...(p.requirements ? { requirements: String(p.requirements) } : {}), ...(p.pullExcludes?.length ? { pullExcludes: p.pullExcludes.map(String) } : {}), ...(p.requireFast ? { requireFast: true } : {}), ...(p.pages?.length ? { pages: p.pages.map(String) } : {}) };
     const old = config.programs || []; const i = old.findIndex((x) => x.name === entry.name);
     if (i >= 0 && old[i].mode === 'remote') throw new Error(`"${entry.name}" is running on another PC; bring it home first, then register it again`);
     config.programs = i >= 0 ? old.map((x, j) => (j === i ? entry : x)) : [...old, entry];   // registering an existing name updates it in place
@@ -294,7 +294,26 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   });
   const app = (name: string) => { const a = (config.apps || []).find((x) => x.name === name); if (!a) throw new Error(`Unknown app "${name}"`); return a; };
   const afterApp = () => { try { apps.syncLinks(config, adeps(), fwd); } catch (e: any) { core.log('err', 'app links: ' + e.message); } refresh(); };
-  H['apps:list'] = () => (config.apps || []).map((a) => { const st = apps.statusApp(config, adeps(), a); return { ...st, members: st.members.map((m) => ({ ...m, up: m.pc === 'this PC' ? null : pcUp(m.pc) })) }; });
+  H['apps:list'] = () => (config.apps || []).map((a) => { const st = apps.statusApp(config, adeps(), a); return { ...st, members: st.members.map((m) => ({ ...m, up: m.pc === 'this PC' ? null : pcUp(m.pc), pages: (m.kind === 'program' ? (config.programs || []).find((x) => x.name === m.name)?.pages : projOf(m)?.pages) ?? [] })) }; });
+  // ---- links: every address worth opening, in one list. localhost:PORT reaches a program wherever it runs (forward / tunnel), so every URL is a localhost URL. ----
+  const pagesOf = (kind: string, name: string) => { if (kind === 'program') return prog(name); if (kind === 'project') return proj(name); throw new Error('kind must be program or project'); };
+  H['pages:set'] = (kind: string, name: string, pages: unknown) => {
+    const t = pagesOf(kind, name); const list = (Array.isArray(pages) ? pages : []).map((x) => String(x).trim()).filter(Boolean).map((x) => (x.startsWith('/') ? x : '/' + x));
+    const bad = core.pagesProblem(name, list); if (bad) throw new Error(bad);
+    const old = t.pages; if (list.length) t.pages = [...new Set(list)]; else delete t.pages;
+    try { persist(); } catch (e) { if (old) t.pages = old; else delete t.pages; throw e; } return t.pages ?? [];
+  };
+  H['links:list'] = () => {
+    const url = (port: number, path = '/') => `http://localhost:${port}${path}`;
+    const pcOfProg = (p: programs.Program) => (p.mode === 'remote' ? rp(p).name : 'this PC');
+    const pcOfProj = (p: core.Project) => (p.mode === 'local' || !p.mode ? 'this PC' : core.remoteFor(config, p.remote).name);
+    const rows: { kind: string; name: string; pc: string; apps: string[]; links: { label: string; url: string }[] }[] = [];
+    const inApps = (kind: 'program' | 'container', n: string) => (config.apps || []).filter((a) => a.members.some((m) => m.kind === kind && m.name === n)).map((a) => a.name);
+    for (const p of config.programs || []) rows.push({ kind: 'program', name: p.name, pc: pcOfProg(p), apps: inApps('program', p.name), links: [{ label: ':' + p.port, url: url(p.port) }, ...(p.pages || []).map((g) => ({ label: g, url: url(p.port, g) }))] });
+    for (const p of config.projects || []) rows.push({ kind: p.container ? 'container' : 'compose', name: p.name, pc: pcOfProj(p), apps: inApps('container', p.container || p.name), links: (p.ports || []).flatMap((pt, i) => [{ label: ':' + pt, url: url(pt) }, ...(i === 0 ? (p.pages || []).map((g) => ({ label: g, url: url(pt, g) })) : [])]) });
+    for (const f of config.forwards || []) rows.push({ kind: 'forward', name: f.name, pc: remote().name, apps: [], links: [{ label: ':' + f.localPort, url: url(f.localPort) }] });
+    return rows;
+  };
   H['apps:save'] = async (a: apps.App, original?: string) => {
     if (!a || typeof a.name !== 'string' || !Array.isArray(a.members)) throw new Error('An app needs a name and members');
     const clean: apps.App = { name: a.name.trim(), members: a.members.map((m) => ({ kind: m.kind, name: String(m.name).trim(), ...(m.target ? { target: m.target } : {}), ...(m.project ? { project: m.project } : {}), ...(m.ports ? { ports: m.ports } : {}) })), ...(a.target ? { target: a.target } : {}), ...(a.note ? { note: String(a.note) } : {}) };

@@ -66,6 +66,13 @@ function spark(vals) {
 }
 const mark = (kind, word) => el('span', { class: kind === 'ok' ? 'w-ok' : kind === 'bad' ? 'w-bad' : kind === 'warn' ? 'w-warn' : 'muted' }, el('span', { class: 'st-sq ' + kind }), word);
 
+/** Clickable addresses. localhost:PORT on this PC reaches a program wherever it runs (tunnel/forward), so these links work after a move too. */
+const lurl = (port, path = '/') => 'http://localhost:' + port + path;
+const link = (port, text, path = '/', extra = {}) => el('a', { class: 'plink', href: lurl(port, path), target: '_blank', rel: 'noopener', title: 'Open ' + lurl(port, path), ...extra }, text ?? String(port));
+const portLinks = (ports, empty = '-') => (ports && ports.length ? el('span', {}, ...ports.flatMap((pt, i) => [i ? ', ' : null, link(pt)])) : empty);
+/** Host ports out of docker's "0.0.0.0:8080->80/tcp, [::]:8080->80/tcp" text. */
+const dockerPorts = (s) => [...new Set([...String(s || '').matchAll(/:(\d+)->/g)].map((m) => +m[1]))];
+
 function section(title, ...actions) { return el('div', { class: 'sec' }, el('h2', {}, title), el('div', { class: 'acts' }, ...actions)); }
 
 /** [PASS]/[FAIL] rows with a one-line summary. results = [{name, ok, detail, ms, warn}] */
