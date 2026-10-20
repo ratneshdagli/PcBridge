@@ -1,7 +1,7 @@
-import { strict as assert } from 'node:assert';
+﻿import { strict as assert } from 'node:assert';
 import { diagnoseSsh, parseTailscaleStatus } from '../src/core';
 
-const host = '100.82.175.87';
+const host = '100.64.0.1';
 const peer = { HostName: 'remote', TailscaleIPs: [host], Online: false };
 for (const BackendState of ['NoState', 'Starting', 'Stopped', 'NeedsLogin']) {
   const ts = parseTailscaleStatus({ BackendState, Health: ['Cannot reach coordination server'], Peer: { peer } }, host);
