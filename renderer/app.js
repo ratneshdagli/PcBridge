@@ -244,7 +244,7 @@ V.apps = (p) => {
 
 // ---------- GLOBAL ENVS (every .env file in one place, grouped by folder) ----------
 // The list lives only in this window's memory: it is read fresh on every scan, never saved, and gone after Clear or closing the window.
-const envState = { data: null, q: '', show: false, examples: false, remote: true, extra: '' };
+const envState = { data: null, version: 0, cleared: false, q: '', show: false, examples: false, remote: true, extra: '' };
 V.envs = (p) => {
   const body = el('div'), res = el('div'), sum = el('div', { class: 'muted mono' });
   const filter = el('input', { class: 'input w3', placeholder: 'filter by folder, file or variable name', value: envState.q, 'aria-label': 'filter', oninput: (e) => { envState.q = e.target.value; paint(); } });
@@ -252,11 +252,11 @@ V.envs = (p) => {
   const chk = (label, key, tip) => el('label', { class: 'chk', title: tip }, el('input', { type: 'checkbox', checked: envState[key], onchange: (e) => { envState[key] = e.target.checked; if (key !== 'remote') paint(); } }), label);
   function paint() {
     const d = envState.data; body.replaceChildren();
-    if (!d) { body.append(el('div', { class: 'empty' }, sum.textContent.startsWith('scanning') ? '' : 'Nothing on screen. Press Scan.')); return; }
+    if (!d) { body.append(el('div', { class: 'empty' }, envState.cleared ? 'Cleared from memory. Press Rescan to load the list again.' : 'Looking for your .env files on every drive. They appear here as they are found…')); return; }
     const q = envState.q.trim().toLowerCase(), hit = (f) => !q || (f.folder + ' ' + f.name + ' ' + f.path).toLowerCase().includes(q);
     const files = d.files.filter((f) => (envState.examples || f.kind !== 'example') && (hit(f) || f.vars.some((v) => v.key.toLowerCase().includes(q))));
     const groups = new Map(); for (const f of files) { const k = f.pc + '|' + f.dir; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
-    sum.textContent = `${files.length} file(s) in ${groups.size} folder(s), ${files.reduce((a, f) => a + f.vars.length, 0)} variable(s) · scanned ${d.scannedDirs} folders in ${(d.ms / 1000).toFixed(1)} s` + (d.truncated ? ' · STOPPED EARLY (time or file limit): add the folder you care about under "extra folders"' : '');
+    sum.textContent = `${files.length} file(s) in ${groups.size} folder(s), ${files.reduce((a, f) => a + f.vars.length, 0)} variable(s) · scanned ${d.scannedDirs} folders in ${(d.ms / 1000).toFixed(1)} s` + (d.truncated ? ' · STOPPED EARLY (time or file limit): use "Search another folder" below' : '') + (d.running ? ' · still searching, more can appear…' : '');
     if (!groups.size) body.append(el('div', { class: 'empty' }, 'No .env file matches.'));
     for (const fl of groups.values()) {
       const f0 = fl[0], local = f0.pc === 'this PC';
@@ -276,16 +276,31 @@ V.envs = (p) => {
       body.append(block);
     }
   }
-  async function scan() {
-    envState.data = null; body.replaceChildren(); res.replaceChildren(); sum.textContent = 'scanning this PC' + (envState.remote ? ' and your other PC(s)' : '') + '… this can take a minute or two (every drive is read)';
-    const r = await window.api.call('envs:scan', { extra: extra.value.split(';').map((x) => x.trim()).filter(Boolean), includeRemote: envState.remote });
-    envState.extra = extra.value; if (!r.ok) { sum.textContent = ''; toast(r.error, true); paint(); return; }
-    envState.data = r.data; res.replaceChildren(...r.data.notes.map((n) => el('div', { class: 'muted mono' }, n))); paint();
+  // The service searches in the background and keeps what it found, so opening this tab shows the list at once and new files appear while it is still searching.
+  let wasRunning = null;
+  async function poll() {
+    const r = await window.api.call('envs:status', envState.version); if (!r.ok || !r.data.started) return;
+    const d = r.data; envState.cleared = false;
+    if (d.files) { envState.data = d; envState.version = d.version; paint(); }
+    else if (envState.data) {
+      Object.assign(envState.data, { running: d.running, scannedDirs: d.scannedDirs, ms: d.ms, truncated: d.truncated });
+      if (d.running !== wasRunning) paint(); else sum.textContent = sum.textContent.replace(/scanned \d+ folders in [\d.]+ s/, `scanned ${d.scannedDirs} folders in ${(d.ms / 1000).toFixed(1)} s`);
+    }
+    wasRunning = d.running; res.replaceChildren(...(d.notes || []).map((n) => el('div', { class: 'muted mono' }, n)));
   }
-  p.append(el('h1', {}, 'Global envs'), el('p', { class: 'sub' }, 'Every .env file found on this PC and in the PC Bridge folder of your other PCs, grouped by the folder it lives in. Values are hidden until you click one (or tick "show values"). Nothing is saved: the list is read fresh on every scan and disappears when you press Clear or close the window.'),
-    section('Find', btn('Scan', scan, 'primary', { title: 'Read every drive again' }), btn('Clear', () => { envState.data = null; sum.textContent = ''; paint(); }, '', { title: 'Remove all values from this screen' })),
-    el('div', { class: 'row' }, filter, extra, chk('show values', 'show', 'Show every value instead of dots'), chk('example files', 'examples', 'Also list .env.example / .env.sample templates'), chk('other PCs', 'remote', 'Also read the .env files of programs that were moved to your other PCs (rescan after changing this)')), sum, res, body);
-  paint(); if (!envState.data) scan();
+  async function rescan() {
+    const r = await window.api.call('envs:scan', { extra: extra.value.split(';').map((x) => x.trim()).filter(Boolean), includeRemote: envState.remote });
+    envState.extra = extra.value; if (!r.ok) { toast(r.error, true); return; }
+    envState.version = 0; envState.cleared = false; await poll();
+  }
+  async function clearAll() { await call('envs:clear'); envState.data = null; envState.version = 0; envState.cleared = true; sum.textContent = ''; res.replaceChildren(); paint(); }
+  p.append(el('h1', {}, 'Global envs'), el('p', { class: 'sub' }, 'Every .env file on this PC and your other PCs, found automatically and grouped by the folder it lives in. You do not have to enter anything. Values are hidden until you click one (or tick "show values"). Nothing is saved to disk.'),
+    section('All env files', btn('Rescan', rescan, '', { title: 'Search every drive again for new or changed files' }), btn('Clear', clearAll, '', { title: 'Remove every value from memory and from this screen' })),
+    el('div', { class: 'row' }, filter, chk('show values', 'show', 'Show every value instead of dots'), chk('example files', 'examples', 'Also list .env.example / .env.sample templates'), chk('other PCs', 'remote', 'Also read the .env files of programs that were moved to your other PCs (applies on the next Rescan)')),
+    sum, res, body,
+    el('details', { class: 'muted envmore' }, el('summary', {}, 'Search another folder (only if a file you expect is missing)'), el('div', { class: 'row' }, extra, btn('Search it', rescan, '', { title: 'Also search this folder, then show everything' }))));
+  paint();
+  (async () => { const r = await window.api.call('envs:status', envState.version); if (r.ok && !r.data.started) await window.api.call('envs:scan', { includeRemote: envState.remote }); await poll(); every(1500, poll); })();   // starts by itself on first open
 };
 
 // ---------- PORTS ----------

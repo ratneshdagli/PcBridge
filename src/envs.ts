@@ -13,7 +13,7 @@ export interface EnvScan { files: EnvFile[]; scannedDirs: number; ms: number; tr
 
 const NAME_RE = /^(?!gradlew\.env$)(?:\.env(?:\..+)?|.+\.env)$/i;   // .env  .env.local  .env.production  prod.env  (not gradlew.env: Android build output)
 const EXAMPLE_RE = /example|sample|template|dist/i;               // .env.example: the shape of the file, not real values
-const MAX_FILE = 256 * 1024, MAX_FILES = 1500, MAX_MS = 90000, MAX_DEPTH = 9, PARALLEL = 16;
+const MAX_FILE = 256 * 1024, MAX_FILES = 1500, MAX_MS = 300000, MAX_DEPTH = 9, PARALLEL = 16;   // results stream in while it searches, so nobody waits on the cap
 // tool caches, not anyone's own settings: Claude's plugin/project caches
 const SKIP_PATH = /\\\.claude\\(plugins|projects|file-history|shell-snapshots)(\\|$)/i;
 // folders that never hold a project's own settings (dependencies, caches, build output, Windows itself). A folder called env/.env is a Python virtualenv.
@@ -40,7 +40,7 @@ const make = (pc: string, full: string, size: number, mtime: number, text: strin
   return { pc, path: full, dir, folder: win.basename(dir) || dir, name, kind: EXAMPLE_RE.test(name) ? 'example' : 'file', size, mtime, vars: parseEnv(text), text };
 };
 
-interface State { pc: string; files: EnvFile[]; seen: Set<string>; dirs: number; t0: number; truncated: boolean; stop: boolean; notes: string[] }
+interface State { pc: string; files: EnvFile[]; seen: Set<string>; dirs: number; t0: number; truncated: boolean; stop: boolean; notes: string[]; bump: () => void }
 /** Reads one folder: queues its sub folders, reads its env files. */
 async function visit(dir: string, depth: number, st: State, queue: [string, number][]): Promise<void> {
   if (st.stop) return;
@@ -57,7 +57,7 @@ async function visit(dir: string, depth: number, st: State, queue: [string, numb
       try {
         const s = await fs.promises.stat(full);
         if (s.size > MAX_FILE) { st.notes.push(`skipped ${full}: ${Math.round(s.size / 1024)} KB is too big for an env file`); continue; }
-        st.files.push(make(st.pc, full, s.size, s.mtimeMs, (await fs.promises.readFile(full, 'utf8')).replace(/^\uFEFF/, '')));
+        st.files.push(make(st.pc, full, s.size, s.mtimeMs, (await fs.promises.readFile(full, 'utf8')).replace(/^\uFEFF/, ''))); st.bump();
       } catch { /* unreadable: skip */ }
     }
   }
@@ -100,24 +100,45 @@ async function scanRemote(c: core.Config, r: core.Remote): Promise<EnvFile[]> {
   return arr.map((f) => make(r.name, f.path, f.size, Date.parse(f.mtime) || 0, Buffer.from(String(f.b64 || ''), 'base64').toString('utf8').replace(/^\uFEFF/, '')));
 }
 
-let known = new Set<string>();   // local paths of the last scan: the only ones "Open folder" will accept
-export async function scanEnvs(c: core.Config, remotes: core.Remote[], opt: { extra?: unknown; includeRemote?: boolean } = {}): Promise<EnvScan> {
-  const t0 = Date.now(); const notes: string[] = [];
+// The scan runs in the background and fills `job` as it finds files, so the screen can show results straight away instead of after a minute.
+// The job lives in this process's memory only (never on disk). The folders to search are found automatically; "extra" is optional.
+interface Job { running: boolean; files: EnvFile[]; dirs: number; t0: number; ms: number; truncated: boolean; notes: string[]; version: number }
+let job: Job = { running: false, files: [], dirs: 0, t0: 0, ms: 0, truncated: false, notes: [], version: 0 };
+const order = (a: EnvFile, b: EnvFile) => a.folder.toLowerCase().localeCompare(b.folder.toLowerCase()) || a.dir.localeCompare(b.dir) || a.name.localeCompare(b.name);
+
+/** Start a scan unless one is running. Returns at once; read progress with envScanStatus. */
+export function startEnvScan(c: core.Config, remotes: core.Remote[], opt: { extra?: unknown; includeRemote?: boolean } = {}): void {
+  if (job.running) return;
   const extra = (Array.isArray(opt.extra) ? opt.extra : []).map(String).map((s) => s.trim()).filter(Boolean);
   for (const x of extra) if (x.length > 260 || !path.isAbsolute(x) || !fs.existsSync(x)) throw new Error(`"${x}" is not a folder on this PC (use a full path like D:\\code)`);
-  const roots = [...extra, ...(c.programs || []).filter((p) => p.mode !== 'remote').map((p) => p.dir), ...(c.projects || []).map((p) => p.path).filter(Boolean), os.homedir(), ...(await drives())];
-  const st: State = { pc: 'this PC', files: [], seen: new Set(), dirs: 0, t0, truncated: false, stop: false, notes };
-  await walkAll(roots.filter((r) => fs.existsSync(r)), st);
-  known = new Set(st.files.map((f) => f.path));
-  const files = [...st.files];
-  if (opt.includeRemote !== false) for (const r of remotes) { try { files.push(...(await scanRemote(c, r))); } catch (e: any) { notes.push(String(e.message || e).split('\n')[0]); } }
-  files.sort((a, b) => a.folder.toLowerCase().localeCompare(b.folder.toLowerCase()) || a.dir.localeCompare(b.dir) || a.name.localeCompare(b.name));
-  return { files, scannedDirs: st.dirs, ms: Date.now() - t0, truncated: st.truncated, notes };
+  const j: Job = job = { running: true, files: [], dirs: 0, t0: Date.now(), ms: 0, truncated: false, notes: [], version: 1 };
+  const bump = () => { j.version++; };
+  void (async () => {
+    try {
+      // the other PCs are read at the same time as this PC's drives
+      const remotesDone = opt.includeRemote === false ? Promise.resolve() : Promise.all(remotes.map(async (r) => { try { j.files.push(...(await scanRemote(c, r))); bump(); } catch (e: any) { j.notes.push(String(e.message || e).split('\n')[0]); bump(); } }));
+      const roots = [...extra, ...(c.programs || []).filter((p) => p.mode !== 'remote').map((p) => p.dir), ...(c.projects || []).map((p) => p.path).filter(Boolean), os.homedir(), ...(await drives())];
+      const st: State = { pc: 'this PC', files: j.files, seen: new Set(), dirs: 0, t0: j.t0, truncated: false, stop: false, notes: j.notes, bump };
+      const tick = setInterval(() => { j.dirs = st.dirs; j.ms = Date.now() - j.t0; }, 500);
+      try { await walkAll(roots.filter((r) => fs.existsSync(r)), st); } finally { clearInterval(tick); }
+      j.dirs = st.dirs; j.truncated = st.truncated; await remotesDone;
+    } catch (e: any) { j.notes.push(String(e.message || e).split('\n')[0]); }
+    j.running = false; j.ms = Date.now() - j.t0; bump();
+  })();
 }
 
-/** Show a file from the last scan in Explorer. Only paths the scan returned are accepted. */
+/** What the scan has found so far. `have` = the version the screen already shows: the (big) file list is only sent when it changed. */
+export function envScanStatus(have?: number) {
+  return { running: job.running, started: job.version > 0, version: job.version, scannedDirs: job.dirs, ms: job.running ? Date.now() - job.t0 : job.ms, truncated: job.truncated, notes: job.notes.slice(0, 20), count: job.files.length,
+    files: have === job.version ? undefined : [...job.files].sort(order) };
+}
+
+/** Forget everything that was found (values included). */
+export function clearEnvScan(): void { job = { running: false, files: [], dirs: 0, t0: 0, ms: 0, truncated: false, notes: [], version: 0 }; }
+
+/** Show a file of the scan in Explorer. Only local paths the scan returned are accepted. */
 export function revealEnv(p: string): string {
-  if (!known.has(p)) throw new Error('That file was not in the last scan: scan again first');
+  if (!job.files.some((f) => f.pc === 'this PC' && f.path === p)) throw new Error('That file is not in the list: wait for the list to load');
   spawn('explorer.exe', ['/select,' + p], { detached: true, stdio: 'ignore' }).unref();
   return 'opened ' + win.dirname(p);
 }

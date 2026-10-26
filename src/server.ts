@@ -269,7 +269,9 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['programs:logs'] = (name: string) => programs.remoteLog(config, rp(prog(name)), name);
   H['programs:push'] = (name: string, files?: programs.PushFile[], restart?: boolean) => programs.pushFiles(config, rp(prog(name)), name, pdeps(), Array.isArray(files) ? files : undefined, restart === true);
   // ---- global envs: UI only (values are secrets, so the token API does not serve them) ----
-  H['envs:scan'] = (opt?: { extra?: unknown; includeRemote?: boolean }) => envs.scanEnvs(config, config.remotes, opt || {});
+  H['envs:scan'] = (opt?: { extra?: unknown; includeRemote?: boolean }) => { envs.startEnvScan(config, config.remotes, opt || {}); return envs.envScanStatus(); };   // returns at once; the list fills in while it runs
+  H['envs:status'] = (have?: number) => envs.envScanStatus(have);
+  H['envs:clear'] = () => { envs.clearEnvScan(); return true; };
   H['envs:reveal'] = (p: string) => envs.revealEnv(String(p));
   H['net:check'] = async (urls: unknown, program?: string, tries?: number) => {   // read-only: DNS + a few GETs from the other PC, to find flaky outbound internet
     const list = (Array.isArray(urls) ? urls : []).map(String);
