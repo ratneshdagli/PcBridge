@@ -10,6 +10,7 @@ import * as core from './core';
 import * as setup from './setup';
 import * as programs from './programs';
 import * as apps from './apps';
+import * as envs from './envs';
 import { PublicApi, newToken, defaultApi } from './publicapi';
 
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
@@ -267,6 +268,9 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['programs:autoupdate'] = (on: boolean) => { config.autoUpdate = on === true; persist(); return config.autoUpdate; };
   H['programs:logs'] = (name: string) => programs.remoteLog(config, rp(prog(name)), name);
   H['programs:push'] = (name: string, files?: programs.PushFile[], restart?: boolean) => programs.pushFiles(config, rp(prog(name)), name, pdeps(), Array.isArray(files) ? files : undefined, restart === true);
+  // ---- global envs: UI only (values are secrets, so the token API does not serve them) ----
+  H['envs:scan'] = (opt?: { extra?: unknown; includeRemote?: boolean }) => envs.scanEnvs(config, config.remotes, opt || {});
+  H['envs:reveal'] = (p: string) => envs.revealEnv(String(p));
   H['net:check'] = async (urls: unknown, program?: string, tries?: number) => {   // read-only: DNS + a few GETs from the other PC, to find flaky outbound internet
     const list = (Array.isArray(urls) ? urls : []).map(String);
     if (!list.length || list.length > 8) throw new Error('urls: give 1 to 8 web addresses');

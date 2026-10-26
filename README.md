@@ -1,16 +1,16 @@
-<div align="center">
+﻿<div align="center">
 
 # PC Bridge
 
 **Turn two Windows PCs into one. Move Docker containers and Node / Python programs to your other PC, keep `localhost` working, and bring everything back with one click.**
 
-Tailscale + SSH keys &nbsp;·&nbsp; no Electron &nbsp;·&nbsp; ~45 MB of RAM &nbsp;·&nbsp; nothing exposed to the internet
+Tailscale + SSH keys &nbsp;Â·&nbsp; no Electron &nbsp;Â·&nbsp; ~45 MB of RAM &nbsp;Â·&nbsp; nothing exposed to the internet
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6) ![Node](https://img.shields.io/badge/node-%E2%89%A518-339933) ![License](https://img.shields.io/badge/license-MIT-blue) ![Auth](https://img.shields.io/badge/auth-SSH%20keys%20only-orange)
 
 <img src="docs/demo.gif" alt="PC Bridge demo" width="860">
 
-[Demo video (mp4)](docs/demo.mp4) · [Full guide](docs/GUIDE.md) · [Report a problem](https://github.com/ratneshdagli/PcBridge/issues)
+[Demo video (mp4)](docs/demo.mp4) Â· [Full guide](docs/GUIDE.md) Â· [Report a problem](https://github.com/ratneshdagli/PcBridge/issues)
 
 </div>
 
@@ -33,6 +33,7 @@ You have a laptop and a second PC (a desktop, a home server, an old machine with
 | **Safe quit** | Close PC Bridge and things stay on the other PC for 10 minutes. Open it again to keep them there, otherwise they come back. |
 | **Push changes** | Edited a file? Send just that file to the program running on the other PC, no new copy, no restart. |
 | **Everything clickable** | Every port you see (containers, programs, apps, forwards, ports) opens `http://localhost:PORT` in one click, and you can save extra pages such as `/docs/try.html` per program. **Apps > All addresses** lists every link in one place (also `GET /api/v1/links`). |
+| **Global envs** | One tab that finds every `.env` file on this PC (all drives) and in your other PCs' PC Bridge folder, grouped by folder name. Search by variable, values hidden until clicked, copy a value, a line or a whole file, open the folder. Nothing is saved and the API never serves them. |
 | **Ports** | Every listening port on this PC, who owns it, what it is for, whether the network can reach it. |
 | **Local API** | Loopback-only HTTP API with a token (off by default) so scripts and AI agents can read and control everything. OpenAPI + a built-in guide. |
 | **Test buttons everywhere** | One click runs every self test and tells you exactly what is wrong. |
@@ -93,12 +94,12 @@ Next time, double-click `PC-Bridge.vbs` (no console window).
 
 ```
  your PC                                        other PC
-┌──────────────────────────┐   Tailscale     ┌──────────────────────────────┐
-│ browser / tools          │   + SSH keys    │ E:\PCBridge\apps\myapp       │
-│   http://localhost:3000 ─┼── ssh -L 3000 ──┼─▶ node server.js  :3000      │
-│ PC Bridge (Node, 45 MB)  │                 │ supervisor restarts it       │
-│   UI on 127.0.0.1 only   │◀── status ──────┤ Docker (WSL) containers      │
-└──────────────────────────┘   LAN: 43 MB/s  └──────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   Tailscale     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚ browser / tools          â”‚   + SSH keys    â”‚ E:\PCBridge\apps\myapp       â”‚
+â”‚   http://localhost:3000 â”€â”¼â”€â”€ ssh -L 3000 â”€â”€â”¼â”€â–¶ node server.js  :3000      â”‚
+â”‚ PC Bridge (Node, 45 MB)  â”‚                 â”‚ supervisor restarts it       â”‚
+â”‚   UI on 127.0.0.1 only   â”‚â—€â”€â”€ status â”€â”€â”€â”€â”€â”€â”¤ Docker (WSL) containers      â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   LAN: 43 MB/s  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 PC Bridge is one small Node process. It serves its UI on `127.0.0.1` and opens it in the Edge/Chrome you already have (`--app` window), so there is no Electron and no bundled browser. It shells out to the system `ssh`, `docker`, `tailscale`, `tar` and `wsl`, and every command it runs is shown in the **Log** screen.
@@ -126,18 +127,18 @@ npm start          # build + run
 npm test           # end-to-end tests against a REAL second PC, see docs/GUIDE.md
 ```
 
-Source layout: `src/core.ts` (ssh/docker/tailscale, routes, offload, failover) · `src/programs.ts` (programs, supervisor, copies) · `src/apps.ts` · `src/balancer.ts` (weighted TCP proxy) · `src/setup.ts` (wizard) · `src/publicapi.ts` (local API) · `src/server.ts` (service) · `renderer/` (UI, plain JS/CSS, no framework, no build step).
+Source layout: `src/core.ts` (ssh/docker/tailscale, routes, offload, failover) Â· `src/programs.ts` (programs, supervisor, copies) Â· `src/apps.ts` Â· `src/balancer.ts` (weighted TCP proxy) Â· `src/setup.ts` (wizard) Â· `src/publicapi.ts` (local API) Â· `src/server.ts` (service) Â· `renderer/` (UI, plain JS/CSS, no framework, no build step).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | Overview is red / DOWN | It tells you why (Tailscale offline, ssh refused, key rejected) and gives a checklist. |
-| "key was rejected" | **Setup → Check** shows the exact public key and where it belongs on that PC. |
-| `docker: not recognized` on the other PC | **Setup → Check →** create `docker.cmd` (shown in full first). |
+| "key was rejected" | **Setup â†’ Check** shows the exact public key and where it belongs on that PC. |
+| `docker: not recognized` on the other PC | **Setup â†’ Check â†’** create `docker.cmd` (shown in full first). |
 | Copies are slow | Make sure both PCs are on the same network and *fast copy over the home network* is ticked in Setup. Install Git for Windows (its `ssh` is much faster than the one built into Windows for big copies). |
 | API answers 401 / 403 | Wrong token, or *Allow control* is off (API screen). |
 
 ## License
 
-[MIT](LICENSE) © Ratnesh Dagli
+[MIT](LICENSE) Â© Ratnesh Dagli

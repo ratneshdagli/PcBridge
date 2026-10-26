@@ -88,6 +88,12 @@ input[type=range]:focus-visible { outline: 2px solid var(--accent); outline-offs
 .plink.pg { font: 12px var(--mono); }
 .lnk { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; white-space: normal; }
 .row > .lnk { margin-left: 8px; }
+/* ---- global envs ---- */
+.envgrp { margin: 16px 0; border-left: 2px solid var(--line); padding-left: 12px; }
+.envhd { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.envhd .acts { margin-left: auto; }
+.envfile { margin: 6px 0 12px; }
+.envval { cursor: pointer; word-break: break-all; }
 
 /* ---- status marks ---- */
 .st-sq { display: inline-block; width: 8px; height: 8px; background: var(--muted); margin-right: 6px; vertical-align: baseline; }

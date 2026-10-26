@@ -1,7 +1,7 @@
 'use strict';
 // PC Bridge UI. Screens are plain functions that build DOM into #main; live data arrives over SSE (status / fwd / log / projects).
-const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
-const NAV_TIP = { overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
+const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['envs', 'Global envs'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
+const NAV_TIP = { overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', envs: 'Every .env file on this PC and your other PCs in one place, grouped by folder: search, show, copy', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
 // ---- clickable addresses (link / portLinks / dockerPorts are in ui.js) ----
 const pageLinks = (port, pages) => (pages || []).map((g) => link(port, g, g, { class: 'plink pg' }));
 /** Ports of containers on the OTHER PC: localhost when this PC forwards that port, otherwise the other PC's own address. */
@@ -16,7 +16,7 @@ async function editPages(kind, name, cur, after) {
   if (v === null) return;
   const r = await call('pages:set', kind, name, v.split(/[\s,]+/).filter(Boolean)); if (r) { toast('Saved'); await reloadCfg(); after(); }
 }
-const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
+const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', envs: 'envs', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
 const V = {};
 let cfg = null, status = null, fwdState = [], cfgFile = '', cur = 'overview', openAtLogin = false, timers = [], ovDraw = null, fwdPaint = null, logAppend = null;
 const hist = { local: { cpu: [], ram: [] }, remote: { cpu: [], ram: [] } };
@@ -240,6 +240,52 @@ V.apps = (p) => {
     section('Import an app', btn('Import', async () => { let m; try { m = JSON.parse(imp.text.value); } catch (e) { toast('That is not valid app file text'); return; } const r = await call('apps:import', m, imp.dir.value.trim(), imp.as.value.trim() || undefined); if (r) { toast('Imported "' + r.data.name + '"'); res.replaceChildren(resultRows(r.data.warnings.length ? r.data.warnings.map((w) => ({ name: w, ok: true, warn: true, detail: '', ms: 0 })) : [{ name: 'imported', ok: true, detail: '', ms: 0 }])); imp.text.value = ''; await reloadCfg(); load(); } }, '', { title: 'Adds the programs and the app from the file. Nothing is moved or overwritten.' })),
     el('div', { class: 'row' }, pick, imp.dir, imp.as), imp.text);
   load();
+};
+
+// ---------- GLOBAL ENVS (every .env file in one place, grouped by folder) ----------
+// The list lives only in this window's memory: it is read fresh on every scan, never saved, and gone after Clear or closing the window.
+const envState = { data: null, q: '', show: false, examples: false, remote: true, extra: '' };
+V.envs = (p) => {
+  const body = el('div'), res = el('div'), sum = el('div', { class: 'muted mono' });
+  const filter = el('input', { class: 'input w3', placeholder: 'filter by folder, file or variable name', value: envState.q, 'aria-label': 'filter', oninput: (e) => { envState.q = e.target.value; paint(); } });
+  const extra = el('input', { class: 'input w4', placeholder: 'extra folders to scan, full paths separated by ;', value: envState.extra, 'aria-label': 'extra folders', title: 'Optional. This PC\'s drives (except C:), your user folder, and every program folder PC Bridge knows are scanned already.' });
+  const chk = (label, key, tip) => el('label', { class: 'chk', title: tip }, el('input', { type: 'checkbox', checked: envState[key], onchange: (e) => { envState[key] = e.target.checked; if (key !== 'remote') paint(); } }), label);
+  function paint() {
+    const d = envState.data; body.replaceChildren();
+    if (!d) { body.append(el('div', { class: 'empty' }, sum.textContent.startsWith('scanning') ? '' : 'Nothing on screen. Press Scan.')); return; }
+    const q = envState.q.trim().toLowerCase(), hit = (f) => !q || (f.folder + ' ' + f.name + ' ' + f.path).toLowerCase().includes(q);
+    const files = d.files.filter((f) => (envState.examples || f.kind !== 'example') && (hit(f) || f.vars.some((v) => v.key.toLowerCase().includes(q))));
+    const groups = new Map(); for (const f of files) { const k = f.pc + '|' + f.dir; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
+    sum.textContent = `${files.length} file(s) in ${groups.size} folder(s), ${files.reduce((a, f) => a + f.vars.length, 0)} variable(s) · scanned ${d.scannedDirs} folders in ${(d.ms / 1000).toFixed(1)} s` + (d.truncated ? ' · STOPPED EARLY (time or file limit): add the folder you care about under "extra folders"' : '');
+    if (!groups.size) body.append(el('div', { class: 'empty' }, 'No .env file matches.'));
+    for (const fl of groups.values()) {
+      const f0 = fl[0], local = f0.pc === 'this PC';
+      const block = el('div', { class: 'envgrp' }, el('div', { class: 'envhd' }, el('b', {}, f0.folder), el('span', { class: 'tag' }, f0.pc), el('span', { class: 'muted mono', title: f0.dir }, f0.dir),
+        el('span', { class: 'acts' }, local ? btn('Open folder', () => call('envs:reveal', f0.path), '', { title: 'Show the file in Explorer' }) : null, btn('Copy path', () => copyText(f0.dir)))));
+      for (const f of fl) {
+        const vars = hit(f) ? f.vars : f.vars.filter((v) => v.key.toLowerCase().includes(q));
+        const rows = vars.map((v) => {
+          const val = el('span', { class: 'mono envval', title: 'Click to show or hide' }); let shown = envState.show;
+          const draw = () => { val.textContent = !v.value ? '(empty)' : shown ? v.value : '•'.repeat(Math.min(v.value.length, 14)); }; val.onclick = () => { shown = !shown; draw(); }; draw();
+          return el('tr', {}, el('td', { class: 'mono' }, v.key), el('td', {}, val), el('td', { class: 'act' }, el('div', { class: 'acts' }, btn('Copy value', () => copyText(v.value)), btn('Copy line', () => copyText(v.key + '=' + v.value)))));
+        });
+        block.append(el('div', { class: 'envfile' }, el('div', { class: 'row' }, el('span', { class: 'mono' }, f.name), f.kind === 'example' ? el('span', { class: 'tag', title: 'A template: the names of the variables, usually not real values' }, 'example') : null,
+          el('span', { class: 'muted' }, `${f.vars.length} variable(s) · changed ${new Date(f.mtime).toLocaleDateString()}`), btn('Copy file', () => copyText(f.text), '', { title: 'Copy the whole file exactly as it is' })),
+          rows.length ? el('table', {}, el('tbody', {}, rows)) : el('div', { class: 'muted' }, 'no variables in this file')));
+      }
+      body.append(block);
+    }
+  }
+  async function scan() {
+    envState.data = null; body.replaceChildren(); res.replaceChildren(); sum.textContent = 'scanning this PC' + (envState.remote ? ' and your other PC(s)' : '') + '… this can take a minute or two (every drive is read)';
+    const r = await window.api.call('envs:scan', { extra: extra.value.split(';').map((x) => x.trim()).filter(Boolean), includeRemote: envState.remote });
+    envState.extra = extra.value; if (!r.ok) { sum.textContent = ''; toast(r.error, true); paint(); return; }
+    envState.data = r.data; res.replaceChildren(...r.data.notes.map((n) => el('div', { class: 'muted mono' }, n))); paint();
+  }
+  p.append(el('h1', {}, 'Global envs'), el('p', { class: 'sub' }, 'Every .env file found on this PC and in the PC Bridge folder of your other PCs, grouped by the folder it lives in. Values are hidden until you click one (or tick "show values"). Nothing is saved: the list is read fresh on every scan and disappears when you press Clear or close the window.'),
+    section('Find', btn('Scan', scan, 'primary', { title: 'Read every drive again' }), btn('Clear', () => { envState.data = null; sum.textContent = ''; paint(); }, '', { title: 'Remove all values from this screen' })),
+    el('div', { class: 'row' }, filter, extra, chk('show values', 'show', 'Show every value instead of dots'), chk('example files', 'examples', 'Also list .env.example / .env.sample templates'), chk('other PCs', 'remote', 'Also read the .env files of programs that were moved to your other PCs (rescan after changing this)')), sum, res, body);
+  paint(); if (!envState.data) scan();
 };
 
 // ---------- PORTS ----------
