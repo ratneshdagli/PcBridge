@@ -244,7 +244,8 @@ V.apps = (p) => {
 
 // ---------- GLOBAL ENVS (every .env file in one place, grouped by folder) ----------
 // The list lives only in this window's memory: it is read fresh on every scan, never saved, and gone after Clear or closing the window.
-const envState = { data: null, version: 0, cleared: false, q: '', show: false, examples: false, remote: true, extra: '' };
+const envState = { data: null, version: 0, cleared: false, q: '', show: false, examples: false, remote: true, extra: '', ov: new Map() };
+let shownKeys = [];
 V.envs = (p) => {
   const body = el('div'), res = el('div'), sum = el('div', { class: 'muted mono' });
   const filter = el('input', { class: 'input w3', placeholder: 'filter by folder, file or variable name', value: envState.q, 'aria-label': 'filter', oninput: (e) => { envState.q = e.target.value; paint(); } });
@@ -258,10 +259,14 @@ V.envs = (p) => {
     const groups = new Map(); for (const f of files) { const k = f.pc + '|' + f.dir; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
     sum.textContent = `${files.length} file(s) in ${groups.size} folder(s), ${files.reduce((a, f) => a + f.vars.length, 0)} variable(s) · scanned ${d.scannedDirs} folders in ${(d.ms / 1000).toFixed(1)} s` + (d.truncated ? ' · STOPPED EARLY (time or file limit): use "Search another folder" below' : '') + (d.running ? ' · still searching, more can appear…' : '');
     if (!groups.size) body.append(el('div', { class: 'empty' }, 'No .env file matches.'));
-    for (const fl of groups.values()) {
-      const f0 = fl[0], local = f0.pc === 'this PC';
-      const block = el('div', { class: 'envgrp' }, el('div', { class: 'envhd' }, el('b', {}, f0.folder), el('span', { class: 'tag' }, f0.pc), el('span', { class: 'muted mono', title: f0.dir }, f0.dir),
-        el('span', { class: 'acts' }, local ? btn('Open folder', () => call('envs:reveal', f0.path), '', { title: 'Show the file in Explorer' }) : null, btn('Copy path', () => copyText(f0.dir)))));
+    shownKeys = [...groups.keys()];
+    for (const [k, fl] of groups) {
+      const f0 = fl[0], local = f0.pc === 'this PC', open = envState.ov.has(k) ? envState.ov.get(k) : !!q;   // closed by default, open while filtering
+      const nv = fl.reduce((a, f) => a + f.vars.length, 0), flip = () => { envState.ov.set(k, !open); paint(); };
+      const block = el('div', { class: 'envgrp' + (open ? ' open' : '') }, el('div', { class: 'envhd', role: 'button', tabindex: '0', 'aria-expanded': String(open), onclick: flip, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } } },
+        el('span', { class: 'chev' }, open ? '▾' : '▸'), el('b', {}, f0.folder), el('span', { class: 'tag' }, f0.pc), el('span', { class: 'muted' }, `${fl.length} file(s) · ${nv} variable(s)`), el('span', { class: 'muted mono', title: f0.dir }, f0.dir),
+        el('span', { class: 'acts', onclick: (e) => e.stopPropagation() }, local ? btn('Open folder', () => call('envs:reveal', f0.path), '', { title: 'Show the file in Explorer' }) : null, btn('Copy path', () => copyText(f0.dir)))));
+      if (!open) { body.append(block); continue; }
       for (const f of fl) {
         const vars = hit(f) ? f.vars : f.vars.filter((v) => v.key.toLowerCase().includes(q));
         const rows = vars.map((v) => {
@@ -296,7 +301,7 @@ V.envs = (p) => {
   async function clearAll() { await call('envs:clear'); envState.data = null; envState.version = 0; envState.cleared = true; sum.textContent = ''; res.replaceChildren(); paint(); }
   p.append(el('h1', {}, 'Global envs'), el('p', { class: 'sub' }, 'Every .env file on this PC and your other PCs, found automatically and grouped by the folder it lives in. You do not have to enter anything. Values are hidden until you click one (or tick "show values"). Nothing is saved to disk.'),
     section('All env files', btn('Rescan', rescan, '', { title: 'Search every drive again for new or changed files' }), btn('Clear', clearAll, '', { title: 'Remove every value from memory and from this screen' })),
-    el('div', { class: 'row' }, filter, chk('show values', 'show', 'Show every value instead of dots'), chk('example files', 'examples', 'Also list .env.example / .env.sample templates'), chk('other PCs', 'remote', 'Also read the .env files of programs that were moved to your other PCs (applies on the next Rescan)')),
+    el('div', { class: 'row' }, btn('Expand all', () => { for (const k of shownKeys) envState.ov.set(k, true); paint(); }), btn('Collapse all', () => { for (const k of shownKeys) envState.ov.set(k, false); paint(); }), filter, chk('show values', 'show', 'Show every value instead of dots'), chk('example files', 'examples', 'Also list .env.example / .env.sample templates'), chk('other PCs', 'remote', 'Also read the .env files of programs that were moved to your other PCs (applies on the next Rescan)')),
     sum, res, body,
     el('details', { class: 'muted envmore' }, el('summary', {}, 'Search another folder (only if a file you expect is missing)'), el('div', { class: 'row' }, extra, btn('Search it', rescan, '', { title: 'Also search this folder, then show everything' }))));
   paint();
