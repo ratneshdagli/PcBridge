@@ -44,6 +44,19 @@ export interface Config {
   remoteRoot?: string;          // folder on the remote's NON-C drive for everything PC Bridge puts there (default E:\PCBridge)
   apps?: import('./apps').App[];   // named groups of programs/containers moved together
   api?: { enabled: boolean; port: number; token: string; control: boolean };   // local API for other programs (off by default)
+  quiet?: QuietCfg;              // quiet hours: go easy on a slow other PC during a daily time window (off by default)
+}
+/** Quiet hours (this PC's local time, 24 h "HH:MM"): the other PC is polled every pollSec seconds instead of every 3, the GPU/Docker-stats queries are skipped,
+ *  and the programs PC Bridge runs there are lowered to BelowNormal CPU priority. Outside the window everything is normal. */
+export interface QuietCfg { enabled?: boolean; from?: string; to?: string; pollSec?: number; lowPriority?: boolean }
+export const quietCfg = (c: Config): Required<QuietCfg> => ({ enabled: c.quiet?.enabled ?? false, from: c.quiet?.from ?? '09:00', to: c.quiet?.to ?? '15:00', pollSec: c.quiet?.pollSec ?? 20, lowPriority: c.quiet?.lowPriority ?? true });
+const hhmm = (t: string) => { const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(t)); return m ? +m[1] * 60 + +m[2] : NaN; };
+/** Is `now` inside the quiet window? A window that crosses midnight (22:00-06:00) works too. */
+export function inQuiet(c: Config, now = new Date()): boolean {
+  const q = quietCfg(c); if (!q.enabled) return false;
+  const a = hhmm(q.from), b = hhmm(q.to), n = now.getHours() * 60 + now.getMinutes();
+  if (isNaN(a) || isNaN(b) || a === b) return false;
+  return a < b ? n >= a && n < b : n >= a || n < b;
 }
 export const defaultConfig = (): Config => ({
   // First run: a placeholder PC. Use Setup > "Connect a PC" to add yours. (PCB_REMOTE_NAME / PCB_REMOTE_HOST / PCB_REMOTE_USER preset it, used by the end-to-end tests.)
@@ -76,6 +89,12 @@ export function validateConfig(c: Config): string[] {
     if (!Number.isInteger(c.api.port) || c.api.port < 1024 || c.api.port > 65535) e.push('API port must be 1024-65535');
     if (c.api.token && !/^pcb_[0-9a-f]{48}$/.test(c.api.token)) e.push('API token is malformed');
     if (c.api.enabled && !c.api.token) e.push('API cannot be enabled without a token');
+  }
+  if (c.quiet) {
+    const q = c.quiet;
+    if (q.from !== undefined && isNaN(hhmm(q.from))) e.push('Quiet hours: "from" must be a time like 09:00');
+    if (q.to !== undefined && isNaN(hhmm(q.to))) e.push('Quiet hours: "to" must be a time like 15:00');
+    if (q.pollSec !== undefined && (!Number.isInteger(q.pollSec) || q.pollSec < 5 || q.pollSec > 120)) e.push('Quiet hours: poll interval must be 5-120 seconds');
   }
   e.push(...require('./programs').validatePrograms(c));
   e.push(...require('./apps').validateApps(c));
@@ -329,7 +348,7 @@ $o.ramTotalMB=[int]($os.TotalVisibleMemorySize/1024); $o.ramFreeMB=$(if($av){[in
 $o.disks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | % { @{id=$_.DeviceID; freeGB=[math]::Round($_.FreeSpace/1GB,1); totalGB=[math]::Round($_.Size/1GB,1)} })
 $o.gpuNames=@(Get-CimInstance Win32_VideoController | % Name)
 $o.nvidia=''; $nv=@("$env:windir\System32\nvidia-smi.exe",'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe') | ? { Test-Path $_ } | select -First 1
-if($nv){ $o.nvidia=((& $nv --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits) -join ';') }
+if($nv -and -not $LIGHT){ $o.nvidia=((& $nv --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits) -join ';') }
 $w=((wsl.exe -l --running | Out-String) -replace '[\0\s]','')
 $d=@{wslRunning=($w -match 'Default'); daemonUp=$false; error=''; ps=@(); stats=@()}
 if($d.wslRunning){
@@ -370,7 +389,7 @@ export async function dockerContext(): Promise<string> {
 }
 
 let lastStats: string[] = [];     // docker stats costs ~1.3 s on the remote, so the poller refreshes it only every few cycles
-export async function getStatus(r: Remote, withStats = true, ports: number[] = []): Promise<Status> {
+export async function getStatus(r: Remote, withStats = true, ports: number[] = [], light = false): Promise<Status> {   // light = quiet hours: skip the GPU query
   const [ts, tcp, ctx] = await Promise.all([tailscaleState(r), (async () => { await probeRoutes(r); return tcpProbe(effectiveHost(r), r.port); })(), dockerContext()]);
   const ri = routeInfo(r); const base = { ts: Date.now(), tailscale: ts, context: ctx, contextIsRemote: ctx === r.contextName, route: ri ? { host: ri.host, primary: ri.primary, candidates: ri.candidates } : undefined };
   if (!fs.existsSync(r.keyPath)) {   // ssh would silently fall back to a default key and hide the misconfiguration
@@ -378,7 +397,7 @@ export async function getStatus(r: Remote, withStats = true, ports: number[] = [
     return { ...base, ssh: { ok: false, latencyMs: tcp.ok ? tcp.ms : null, error: err, ...diagnoseSsh(err, ts) } };
   }
   if (!tcp.ok) { const d = diagnoseSsh(tcp.error || '', ts); return { ...base, ssh: { ok: false, latencyMs: null, error: `TCP ${r.host}:${r.port}: ${tcp.error}`, ...d } }; }
-  const x = await psRemote(r, `$WITHSTATS=${withStats ? '$true' : '$false'}; $PORTS=@(${ports.join(',')})\n` + STATUS_PS, { timeout: 20000, poll: true });
+  const x = await psRemote(r, `$WITHSTATS=${withStats ? '$true' : '$false'}; $LIGHT=${light ? '$true' : '$false'}; $PORTS=@(${ports.join(',')})\n` + STATUS_PS, { timeout: 20000, poll: true });
   const line = x.stdout.split('\n').find((l) => l.startsWith('__PCB__'));
   if (x.code !== 0 || !line) {
     const err = x.timedOut ? 'ssh command timed out' : (x.stderr || x.stdout || `exit ${x.code}`).split('\n').filter((l) => !l.startsWith('#< CLIXML'))[0];

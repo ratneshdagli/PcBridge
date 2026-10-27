@@ -255,6 +255,20 @@ $res=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{C
 if($res.ReturnValue -ne 0){ throw ('could not start the supervisor, code ' + $res.ReturnValue) }; 'ok'`), { timeout: 30000 });
   if (x.code !== 0) throw fail('could not start the program on the remote', x);
 }
+/** Quiet hours: lower (or restore) the CPU priority of everything PC Bridge runs on that PC, so a slow PC stays usable for whoever sits at it.
+ *  Only processes whose command line mentions PC Bridge's own folder (the supervisors, the programs, their browsers) are touched; nothing else on that PC is. */
+export async function setRemotePriority(c: core.Config, r: core.Remote, low: boolean): Promise<string> {
+  const rt = root(c);
+  // the set = processes that mention the folder + everything they started (a browser started by a program no longer shows the folder on its command line)
+  const x = await core.psRemote(r, `$ErrorActionPreference='SilentlyContinue'; $root='${rt}\\'; $n=0; $all=@(Get-CimInstance Win32_Process); $set=@{}
+foreach($p in $all){ if($p.ProcessId -ne $PID -and $p.CommandLine -and $p.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0){ $set[[int]$p.ProcessId]=1 } }
+for($i=0;$i -lt 4;$i++){ foreach($p in $all){ if($p.ProcessId -ne $PID -and $set.ContainsKey([int]$p.ParentProcessId) -and -not $set.ContainsKey([int]$p.ProcessId)){ $set[[int]$p.ProcessId]=1 } } }
+foreach($id in @($set.Keys)){ try { (Get-Process -Id $id).PriorityClass = '${low ? 'BelowNormal' : 'Normal'}'; $n++ } catch { } }
+"$n"`, { timeout: 30000, poll: true });
+  if (x.code !== 0) throw new Error(`priority change on ${r.name} failed: ${(x.stderr || 'exit ' + x.code).split('\n')[0]}`);
+  return `${x.stdout.trim()} process(es) on ${r.name} set to ${low ? 'low' : 'normal'} priority`;
+}
+
 export interface RemoteState { supervisor: boolean; portUp: boolean; node: boolean; owner?: string }
 export async function remoteState(c: core.Config, r: core.Remote, p: Program): Promise<RemoteState> {
   const x = await core.psRemote(r, ps(c, `$f="$root\\run\\${p.name}.pid"; $s=$false; if(Test-Path $f){ $s=[bool](Get-Process -Id ([int](Get-Content $f)) -ErrorAction SilentlyContinue) }

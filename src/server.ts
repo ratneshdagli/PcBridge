@@ -98,12 +98,27 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     else if (c === 'quit') softQuit();
   }
 
+  // ---- quiet hours: while the window is open, what PC Bridge runs on the other PCs gets low CPU priority; when it closes, normal again. Re-applied every 10 min
+  //      while quiet (a restarted program starts at normal priority). Never touches anything that is not under PC Bridge's own folder. ----
+  let prio: 'low' | 'normal' | '' = '', prioAt = 0, prioBusy = false;
+  async function quietPriority(quiet: boolean) {
+    const want: 'low' | 'normal' = quiet && core.quietCfg(config).lowPriority ? 'low' : 'normal';
+    if (prioBusy || (want === prio && (want === 'normal' || Date.now() - prioAt < 600000))) return;
+    if (want === 'normal' && prio === '') { prio = 'normal'; return; }   // never lowered anything: nothing to restore
+    prioBusy = true;
+    try {
+      const pcs = [...new Set((config.programs || []).filter((p) => p.mode === 'remote').map((p) => rp(p)))];
+      for (const r of pcs) core.log('info', 'quiet hours: ' + await programs.setRemotePriority(config, r, want === 'low'));
+      prio = want; prioAt = Date.now();
+    } finally { prioBusy = false; }
+  }
   // ---- status poller: one batched ssh call per cycle, never overlapping, hard timeouts inside core ----
   let cycle = 0, autoDone = false;
   async function tick() {
     let s: core.Status;
     const ports = config.projects.filter(core.isAway).flatMap((p) => p.ports || []);
-    try { s = await core.getStatus(remote(), cycle++ % 3 === 0, ports); }
+    const quiet = core.inQuiet(config);   // quiet hours: the other PC is slow, so ask it for less (see core.QuietCfg)
+    try { s = await core.getStatus(remote(), quiet ? cycle++ % 10 === 0 : cycle++ % 3 === 0, ports, quiet); }
     catch (e: any) { s = { ts: Date.now(), tailscale: { state: 'unknown', detail: '' }, context: '?', contextIsRemote: false,
       ssh: { ok: false, latencyMs: null, error: 'internal error: ' + e.message, ...core.diagnoseSsh('', { state: 'unknown', detail: '' }) } }; }
     s.local = await core.localMetrics().catch(() => undefined);
@@ -118,7 +133,8 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     off.onStatus(s).catch((e) => core.log('err', 'offload monitor: ' + e.message));
     if (config.autoUpdate && s.ssh.ok && !updating && (config.programs || []).some((p) => p.mode === 'remote') && Date.now() - (config.programsUpdatedAt || 0) > 7 * 86400000) { updating = true; core.log('info', 'Weekly update of the remote tools and libraries'); (H['programs:update'](true) as Promise<unknown>).catch((e) => core.log('err', 'auto update: ' + e.message)).finally(() => { updating = false; config.programsUpdatedAt = Date.now(); core.saveConfig(cfgFile, config); }); }
     if (config.programs?.length) programs.watchPrograms(config, (r) => (r === remote() ? s.ssh.ok : off.healthOf(r.name)), pdeps()).catch((e) => core.log('err', 'program monitor: ' + e.message));
-    await new Promise<void>((res) => { const t = setTimeout(res, 3000); wake = () => { clearTimeout(t); res(); }; });
+    quietPriority(quiet).catch((e) => core.log('err', 'quiet hours: ' + e.message));
+    await new Promise<void>((res) => { const t = setTimeout(res, quiet ? core.quietCfg(config).pollSec * 1000 : 3000); wake = () => { clearTimeout(t); res(); }; });
     wake = null; if (!quitting) setImmediate(tick);
   }
 

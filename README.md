@@ -34,6 +34,7 @@ You have a laptop and a second PC (a desktop, a home server, an old machine with
 | **Push changes** | Edited a file? Send just that file to the program running on the other PC, no new copy, no restart. |
 | **Everything clickable** | Every port you see (containers, programs, apps, forwards, ports) opens `http://localhost:PORT` in one click, and you can save extra pages such as `/docs/try.html` per program. **Apps > All addresses** lists every link in one place (also `GET /api/v1/links`). |
 | **Global envs** | One tab that finds every `.env` file on this PC (all drives) and in your other PCs' PC Bridge folder, grouped by folder name. Search by variable, values hidden until clicked, copy a value, a line or a whole file, open the folder. Nothing is saved and the API never serves them. |
+| **Quiet hours** | Set a daily window (for example 09:00-15:00) for a slow other PC: PC Bridge then checks it every 20 s instead of every 3 s, skips the GPU and Docker-stats queries, and runs the programs it started there at low CPU priority. Off by default, in Setup. |
 | **Ports** | Every listening port on this PC, who owns it, what it is for, whether the network can reach it. |
 | **Local API** | Loopback-only HTTP API with a token (off by default) so scripts and AI agents can read and control everything. OpenAPI + a built-in guide. |
 | **Test buttons everywhere** | One click runs every self test and tells you exactly what is wrong. |
