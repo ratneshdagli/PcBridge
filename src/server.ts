@@ -280,6 +280,8 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['programs:prepare'] = (target?: string) => programs.prepareRemote(config, core.remoteFor(config, target));
   H['programs:move'] = async (name: string, stopLocalPid?: number, target?: string) => { const p = prog(name); const oldRemote = p.remote; if (target) { if (!config.remotes.some((x) => x.name === target)) throw new Error(`There is no PC named "${target}"`); p.remote = target; } try { const m = await programs.moveProgram(config, rp(p), name, pdeps(), stopLocalPid); refresh(); return m; } catch (e) { if (p.mode !== 'remote') p.remote = oldRemote; throw e; } };   // a failed move leaves the program exactly as it was
   H['programs:home'] = async (name: string) => { const m = await programs.bringProgramHome(config, rp(prog(name)), name, pdeps()); refresh(); return m; };
+  H['programs:stop'] = async (name: string) => { const m = await programs.stopProgram(config, rp(prog(name)), name, pdeps()); refresh(); return m; };
+  H['programs:start'] = async (name: string) => { const m = await programs.startProgram(config, rp(prog(name)), name, pdeps()); refresh(); return m; };
   H['programs:update'] = async (apply: boolean) => { const pcs = [...new Set([remote(), ...(config.programs || []).filter((p) => p.mode === 'remote').map(rp)])]; const rows: programs.UpdateRow[] = []; for (const r of pcs) for (const x of await programs.updateRemote(config, r, pdeps(), apply === true)) rows.push(pcs.length > 1 ? { ...x, name: `[${r.name}] ${x.name}` } : x); refresh(); return rows; };
   H['programs:autoupdate'] = (on: boolean) => { config.autoUpdate = on === true; persist(); return config.autoUpdate; };
   H['programs:logs'] = (name: string) => programs.remoteLog(config, rp(prog(name)), name);
@@ -386,7 +388,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   function quit(): Promise<void> {
     return quitP ??= (async () => {
       quitting = true;
-      const awayProgs = (config.programs || []).filter((p) => p.mode === 'remote');
+      const awayProgs = (config.programs || []).filter((p) => p.mode === 'remote' && !p.stopped);   // a program stopped on purpose is not brought home (that would start it here)
       const away = config.projects.filter(core.isAway);
       if (awayProgs.length) { core.log('info', `Quitting: bringing ${awayProgs.map((p) => p.name).join(', ')} back to this PC first`); await Promise.race([Promise.all(awayProgs.map((p) => programs.bringProgramHome(config, rp(p), p.name, pdeps()).catch((x) => core.log('err', `restore ${p.name}: ${x.message}`)))), new Promise((r) => setTimeout(r, 120000))]); }
       if (away.length) {

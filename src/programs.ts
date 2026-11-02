@@ -25,6 +25,7 @@ export interface Program {
   pullExcludes?: string[];              // folders (relative to the program's folder, e.g. "data") that "bring home", Quit and failover do NOT copy back from the other PC; pushing them still works
   requireFast?: boolean;                // the copy must go over the home network: refuse up front (nothing is copied) instead of crawling through Tailscale
   pages?: string[];                     // extra pages to open on its port, as paths (e.g. "/docs/try.html"); shown as clickable links
+  stopped?: boolean;                    // kept registered (files stay on the PC) but deliberately not running: no restart, no failover, Quit does not bring it home, a push does not start it
   synced?: number;                      // ms timestamp of the last full copy or push to the other PC: "push" without a file list sends what changed after it
 }
 export const runtimeOf = (p: Program): 'node' | 'python' => p.runtime ?? (fs.existsSync(path.join(p.dir, 'package.json')) ? 'node' : fs.existsSync(path.join(p.dir, 'requirements.txt')) || fs.existsSync(path.join(p.dir, 'pyproject.toml')) || /^\s*(python|py|uv)\b/i.test(p.cmd) ? 'python' : 'node');
@@ -233,6 +234,7 @@ export async function pushFiles(c: core.Config, r: core.Remote, name: string, d:
   } finally { try { fs.unlinkSync(lf); } catch { /* temp file already gone */ } if (inline.size) fs.rmSync(stage, { recursive: true, force: true }); }
   p.synced = started; d.save();
   let health = '';
+  if (restart && p.stopped) { restart = false; core.log('info', `[program ${name}] is stopped on purpose: files sent, not started`); }
   if (restart) {   // report whether it came back, so callers do not have to poll
     await remoteStart(c, r, p);
     let up = false; for (let i = 0; i < 20 && !up; i++) { up = (await remoteState(c, r, p)).portUp; if (!up) await new Promise((res) => setTimeout(res, 1500)); }
@@ -254,6 +256,25 @@ export async function remoteStart(c: core.Config, r: core.Remote, p: Program): P
 $res=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$cl; CurrentDirectory="$root"}
 if($res.ReturnValue -ne 0){ throw ('could not start the supervisor, code ' + $res.ReturnValue) }; 'ok'`), { timeout: 30000 });
   if (x.code !== 0) throw fail('could not start the program on the remote', x);
+}
+/** Stop a program for good but keep it registered: its supervisor and process are killed (by the pid file of THIS program only), the local tunnel is closed and nothing starts it again until startProgram. */
+export async function stopProgram(c: core.Config, r: core.Remote, name: string, d: ProgramDeps): Promise<string> {
+  const p = (c.programs || []).find((x) => x.name === name); if (!p) throw new Error(`There is no program "${name}"`);
+  if (p.mode !== 'remote') throw new Error(`"${name}" runs on this PC, not on another one: stop it there`);
+  p.stopped = true; d.save(); d.fwd.stop(p.port);
+  await remoteStop(c, r, p);
+  const s = await remoteState(c, r, p).catch(() => null);
+  core.log('info', `[program ${name}] stopped on ${r.name} (stays registered, will not restart)`);
+  return `${name}: stopped on ${r.name}${s ? (s.supervisor || s.portUp ? '; BUT something still answers (see GET /programs)' : '; supervisor and port are down') : ''}. It stays registered with its files; POST /programs/${name}/start brings it back.`;
+}
+export async function startProgram(c: core.Config, r: core.Remote, name: string, d: ProgramDeps): Promise<string> {
+  const p = (c.programs || []).find((x) => x.name === name); if (!p) throw new Error(`There is no program "${name}"`);
+  if (p.mode !== 'remote') throw new Error(`"${name}" runs on this PC, not on another one`);
+  p.stopped = false; d.save();
+  await remoteStart(c, r, p);
+  d.fwd.start(r, { name: p.name, localPort: p.port, remotePort: p.port, remoteHost: '127.0.0.1' }).catch((e) => core.log('err', `[program ${name}] forward: ${e.message}`));
+  core.log('info', `[program ${name}] started again on ${r.name}`);
+  return `${name}: started on ${r.name}`;
 }
 /** Quiet hours: lower (or restore) the CPU priority of everything PC Bridge runs on that PC, so a slow PC stays usable for whoever sits at it.
  *  Only processes whose command line mentions PC Bridge's own folder (the supervisors, the programs, their browsers) are touched; nothing else on that PC is. */
@@ -431,6 +452,7 @@ $j=(& "$root\\tools\\node\\npm.cmd" outdated --json 2>$null | Out-String); if($j
   // restart the programs whose runtime or libraries changed
   for (const name of touched) {
     const p = progs.find((q) => q.name === name)!;
+    if (p.stopped) { row(`${p.name} restarted`, '', '', 'info', 'stopped on purpose: left stopped'); continue; }
     try { await remoteStart(c, r, p); let up = false; for (let i = 0; i < 30 && !up; i++) { up = (await remoteState(c, r, p)).portUp; if (!up) await new Promise((res) => setTimeout(res, 1500)); } row(`${p.name} restarted`, '', '', up ? 'info' : 'failed', up ? 'answering again' : 'did not answer after the update - see its log'); }
     catch (e: any) { row(`${p.name} restarted`, '', '', 'failed', e.message); }
   }
@@ -442,7 +464,7 @@ const strikes = new Map<string, number>(); const polls = new Map<string, number>
 /** Called on every status poll. Remote reachable: keep the forward up and re-start a supervisor that vanished (remote reboot). Remote dead for 3 polls: run it on this PC (failover). */
 export async function watchPrograms(c: core.Config, reachable: (r: core.Remote) => boolean | undefined, d: ProgramDeps): Promise<void> {
   for (const p of c.programs || []) {
-    if (p.mode !== 'remote') continue;
+    if (p.mode !== 'remote' || p.stopped) continue;
     const r = core.remoteFor(c, p.remote); const sshOk = reachable(r); if (sshOk === undefined) continue;   // not probed yet
     if (!sshOk) {
       const n = (strikes.get(p.name) || 0) + 1; strikes.set(p.name, n);
