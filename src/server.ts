@@ -270,6 +270,14 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   const rp = (p: { remote?: string }) => core.remoteFor(config, p.remote);
   const prog = (name: string) => { const p = (config.programs || []).find((x) => x.name === name); if (!p) throw new Error(`Unknown program "${name}"`); return p; };
   H['programs:list'] = async () => { const list = config.programs || []; return Promise.all(list.map(async (p) => ({ ...p, pc: rp(p).name, live: p.mode === 'remote' ? await programs.remoteState(config, rp(p), p).catch(() => null) : null, holder: p.mode === 'remote' ? null : await core.pidOnPort(p.port).catch(() => null) }))); };
+  /** Change which ports of THIS PC a program (even one running on another PC) can reach on its own localhost; the link is made on the next tick. */
+  H['programs:needs'] = (name: string, ports: number[]) => {
+    const p = (config.programs || []).find((x) => x.name === name); if (!p) throw new Error(`no program "${name}"`);
+    const list = [...new Set((ports || []).map(Number))];
+    if (list.length > 20 || list.some((x) => !Number.isInteger(x) || x < 1 || x > 65535 || x === p.port)) throw new Error('needs must be a list of ports (not the program\'s own port)');
+    const old = p.needs; p.needs = list.length ? list : undefined;
+    try { persist(); } catch (err) { p.needs = old; throw err; } return p.needs || [];
+  };
   H['programs:add'] = (p: programs.Program) => {
     const entry: programs.Program = { name: String(p.name), dir: String(p.dir), cmd: String(p.cmd), port: Number(p.port), mode: 'local', env: p.env, ...(p.runtime ? { runtime: p.runtime } : {}), ...(p.failover !== undefined ? { failover: !!p.failover } : {}), ...(p.needs?.length ? { needs: p.needs.map(Number) } : {}), ...(p.omitDev ? { omitDev: true } : {}), ...(p.ignoreScripts ? { ignoreScripts: true } : {}), ...(p.python ? { python: String(p.python) } : {}), ...(p.requirements ? { requirements: String(p.requirements) } : {}), ...(p.pullExcludes?.length ? { pullExcludes: p.pullExcludes.map(String) } : {}), ...(p.requireFast ? { requireFast: true } : {}), ...(p.pages?.length ? { pages: p.pages.map(String) } : {}) };
     const old = config.programs || []; const i = old.findIndex((x) => x.name === entry.name);
