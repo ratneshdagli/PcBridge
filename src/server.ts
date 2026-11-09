@@ -11,6 +11,7 @@ import * as setup from './setup';
 import * as programs from './programs';
 import * as apps from './apps';
 import * as envs from './envs';
+import * as keyhub from './keyhub';
 import { PublicApi, newToken, defaultApi } from './publicapi';
 
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
@@ -291,6 +292,12 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['envs:status'] = (have?: number) => envs.envScanStatus(have);
   H['envs:clear'] = () => { envs.clearEnvScan(); return true; };
   H['envs:reveal'] = (p: string) => envs.revealEnv(String(p));
+  // ---- API keys: the gateway (keygw.ts) is its own process; these only start it and read its numbers ----
+  H['keys:status'] = () => keyhub.status();
+  H['keys:start'] = async () => { keyhub.start(); await new Promise((r) => setTimeout(r, 1500)); return keyhub.status(); };
+  H['keys:check'] = () => keyhub.check();
+  H['keys:autostart'] = (on: boolean) => keyhub.setAutostart(on === true);
+  H['keys:reveal'] = () => keyhub.reveal();
   H['net:check'] = async (urls: unknown, program?: string, tries?: number) => {   // read-only: DNS + a few GETs from the other PC, to find flaky outbound internet
     const list = (Array.isArray(urls) ? urls : []).map(String);
     if (!list.length || list.length > 8) throw new Error('urls: give 1 to 8 web addresses');
@@ -433,7 +440,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     fs.writeFileSync(svcFile, JSON.stringify({ port, token, pid: process.pid }));
     core.log('info', `PC Bridge service on http://127.0.0.1:${port}`);
     if (config.keepAwake) fwd.startKeepAwake(remote());
-    startTray(); paintTray(null); tick();
+    startTray(); paintTray(null); tick(); keyhub.ensure().catch((e) => core.log('err', 'key gateway: ' + e.message));
     if (apiCfg().enabled) pub.apply().catch((e) => core.log('err', 'API: ' + e.message));
     if (!process.argv.includes('--hidden') && !process.env.PCB_NO_UI) openUi(port, token);
     if (process.env.PCB_PRINT) console.log(JSON.stringify({ port, token }));

@@ -1,7 +1,7 @@
 'use strict';
 // PC Bridge UI. Screens are plain functions that build DOM into #main; live data arrives over SSE (status / fwd / log / projects).
-const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['envs', 'Global envs'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
-const NAV_TIP = { overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', envs: 'Every .env file on this PC and your other PCs in one place, grouped by folder: search, show, copy', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
+const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['envs', 'Global envs'], ['keys', 'API keys'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
+const NAV_TIP = { keys: 'One place for your Groq and Gemini keys: every program uses them through it, it moves to the next account when one runs out, and you see the hits per account, program and day', overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', envs: 'Every .env file on this PC and your other PCs in one place, grouped by folder: search, show, copy', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
 // ---- clickable addresses (link / portLinks / dockerPorts are in ui.js) ----
 const pageLinks = (port, pages) => (pages || []).map((g) => link(port, g, g, { class: 'plink pg' }));
 /** Ports of containers on the OTHER PC: localhost when this PC forwards that port, otherwise the other PC's own address. */
@@ -16,7 +16,7 @@ async function editPages(kind, name, cur, after) {
   if (v === null) return;
   const r = await call('pages:set', kind, name, v.split(/[\s,]+/).filter(Boolean)); if (r) { toast('Saved'); await reloadCfg(); after(); }
 }
-const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', envs: 'envs', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
+const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', envs: 'envs', keys: 'keys', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
 const V = {};
 let cfg = null, status = null, fwdState = [], cfgFile = '', cur = 'overview', openAtLogin = false, timers = [], ovDraw = null, fwdPaint = null, logAppend = null;
 const hist = { local: { cpu: [], ram: [] }, remote: { cpu: [], ram: [] } };
@@ -306,6 +306,39 @@ V.envs = (p) => {
     el('details', { class: 'muted envmore' }, el('summary', {}, 'Search another folder (only if a file you expect is missing)'), el('div', { class: 'row' }, extra, btn('Search it', rescan, '', { title: 'Also search this folder, then show everything' }))));
   paint();
   (async () => { const r = await window.api.call('envs:status', envState.version); if (r.ok && !r.data.started) await window.api.call('envs:scan', { includeRemote: envState.remote }); await poll(); every(1500, poll); })();   // starts by itself on first open
+};
+
+// ---------- API KEYS (the gateway lives in its own process; this screen only reads its numbers) ----------
+V.keys = (p) => {
+  const body = el('div'), res = el('div');
+  const n = (v) => (v || 0).toLocaleString();
+  const cell = (c) => el('td', {}, `${n(c.req)}`, c.limited ? el('span', { class: 'w-warn' }, ` (${c.limited} limited)`) : null, c.err ? el('span', { class: 'w-bad' }, ` (${c.err} failed)`) : null);
+  const when = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const base = (pv) => `http://127.0.0.1:${pv}`;
+  function paint(s) {
+    body.replaceChildren();
+    const gwUp = s.up;
+    body.append(el('div', { class: 'row' }, mark(gwUp ? 'ok' : 'bad', gwUp ? `Gateway running on port ${s.port}` : 'Gateway is not running'), !gwUp ? btn('Start gateway', async () => { await call('keys:start'); setTimeout(poll, 1500); }) : null,
+      sw('Start with Windows', s.autostart, async (v) => !!(await call('keys:autostart', v))), btn('Check keys', async () => { res.replaceChildren(el('div', { class: 'muted' }, 'asking each account…')); const r = await call('keys:check'); res.replaceChildren(r ? checkRows(r.data) : ''); await poll(); }, '', { title: 'Send one tiny request with every account and show which ones work' }), btn('Open keys file', () => call('keys:reveal'), '', { title: 'keys.json: add, change or remove an account here; it is picked up within seconds' })));
+    if (!s.hasKeys) body.append(el('div', { class: 'empty' }, 'No keys file yet. Press "Open keys file" and add your accounts as {"groq":[{"label":"name","key":"…"}],"gemini":[…]}.'));
+    for (const pv of ['groq', 'gemini']) {
+      const ks = s.providers[pv] || []; if (!ks.length) continue;
+      const tot = ks.reduce((a, k) => ({ req: a.req + k.req, tok: a.tok + k.tok }), { req: 0, tok: 0 });
+      body.append(section(`${pv === 'groq' ? 'Groq' : 'Gemini'} accounts`, el('span', { class: 'muted' }, `${n(tot.req)} requests today · ${n(tot.tok)} tokens · ${ks.filter((k) => k.state === 'ready').length} of ${ks.length} ready`)),
+        el('table', {}, el('thead', {}, el('tr', {}, ['Account', 'State', 'Requests today', 'OK', 'Tokens'].map((h) => el('th', {}, h)))), el('tbody', {}, ks.map((k) => el('tr', {}, el('td', { class: 'mono' }, k.label),
+          el('td', {}, mark(k.state === 'ready' ? 'ok' : k.state === 'cooling' ? 'warn' : 'bad', k.state === 'ready' ? 'ready' : k.state === 'cooling' ? 'resting until ' + when(Math.min(...k.cool.map((c) => c.until))) + ' (' + k.cool[0].why + ')' : 'key rejected, retry ' + when(k.cool[0].until))),
+          cell(k), el('td', {}, n(k.ok)), el('td', {}, n(k.tok)))))));
+    }
+    if (s.clients?.length) body.append(section('Who used them today'), el('table', {}, el('thead', {}, el('tr', {}, ['Program', 'For', 'Requests', 'Tokens', 'Accounts used'].map((h) => el('th', {}, h)))), el('tbody', {}, s.clients.map((c) => el('tr', {}, el('td', { class: 'mono' }, c.client), el('td', {}, c.provider), cell(c), el('td', {}, n(c.tok)), el('td', { class: 'muted' }, c.accounts.map((a) => `${a.label} ×${a.req}`).join(', ') || '-'))))));
+    if (s.days?.length) body.append(section('Last days'), el('table', {}, el('thead', {}, el('tr', {}, ['Day', 'Groq requests', 'Groq tokens', 'Gemini requests', 'Gemini tokens'].map((h) => el('th', {}, h)))), el('tbody', {}, s.days.map((d) => el('tr', {}, el('td', { class: 'mono' }, d.date), cell(d.groq), el('td', {}, n(d.groq.tok)), cell(d.gemini), el('td', {}, n(d.gemini.tok)))))));
+    const addr = (pv, tail) => el('div', { class: 'row' }, el('span', { class: 'mono' }, `${base(s.port)}/${pv}/<program-name>${tail}`), btn('Copy', () => copyText(`${base(s.port)}/${pv}/YOURPROGRAM${tail}`)));
+    body.append(section('Connect a program'), el('p', { class: 'sub' }, 'Point the program at one of these addresses instead of the provider, give it any dummy key, and put its own name where it says <program-name> so the numbers above show who used what. The gateway adds the real key and moves to the next account by itself. It keeps working when PC Bridge is closed. A program on another PC needs port ' + s.port + ' in its "needs" list.'),
+      addr('groq', ''), addr('groq', '/openai/v1'), addr('gemini', ''));
+  }
+  const checkRows = (r) => Array.isArray(r) ? resultRows(r.map((k) => ({ name: k.provider + ' / ' + k.label, ok: k.ok, detail: k.ok ? 'works' : 'HTTP ' + k.status + (k.message ? ' ' + k.message : ''), ms: 0 }))) : el('div', { class: 'w-bad' }, r.error || 'no answer');
+  async function poll() { const r = await window.api.call('keys:status'); if (r.ok) paint(r.data); }
+  p.append(el('h1', {}, 'API keys'), el('p', { class: 'sub' }, 'Groq and Gemini only. Every program asks the gateway, the gateway picks the account with the fewest requests today and moves on when one runs out. Keys never appear on this screen.'), res, body);
+  poll(); every(4000, poll);
 };
 
 // ---------- PORTS ----------
