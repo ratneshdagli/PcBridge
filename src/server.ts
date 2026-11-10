@@ -278,6 +278,11 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     const old = p.needs; p.needs = list.length ? list : undefined;
     try { persist(); } catch (err) { p.needs = old; throw err; } return p.needs || [];
   };
+  /** Text to paste into any AI session or agent so it knows where to start: the notes file next to the app folder if there is one, else the README. */
+  H['notes:prompt'] = () => {
+    const root = path.join(__dirname, '..', '..'), notes = path.join(root, '..', 'PC-BRIDGE-NOTES.md'), file = fs.existsSync(notes) ? notes : path.join(root, 'README.md');
+    return `Before doing anything, read ${path.resolve(file)}. It holds the project's rules, what is running, the Groq/Gemini key gateway on 127.0.0.1:8795 and how to commit and restart. Follow it exactly. Use the gateway for Groq and Gemini calls and never copy, print or hardcode an API key. If you change something important, update that file.`;
+  };
   H['programs:add'] = (p: programs.Program) => {
     const entry: programs.Program = { name: String(p.name), dir: String(p.dir), cmd: String(p.cmd), port: Number(p.port), mode: 'local', env: p.env, ...(p.runtime ? { runtime: p.runtime } : {}), ...(p.failover !== undefined ? { failover: !!p.failover } : {}), ...(p.needs?.length ? { needs: p.needs.map(Number) } : {}), ...(p.omitDev ? { omitDev: true } : {}), ...(p.ignoreScripts ? { ignoreScripts: true } : {}), ...(p.python ? { python: String(p.python) } : {}), ...(p.requirements ? { requirements: String(p.requirements) } : {}), ...(p.pullExcludes?.length ? { pullExcludes: p.pullExcludes.map(String) } : {}), ...(p.requireFast ? { requireFast: true } : {}), ...(p.pages?.length ? { pages: p.pages.map(String) } : {}) };
     const old = config.programs || []; const i = old.findIndex((x) => x.name === entry.name);
