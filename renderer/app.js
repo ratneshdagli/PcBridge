@@ -310,7 +310,7 @@ V.envs = (p) => {
 
 // ---------- API KEYS (the gateway lives in its own process; this screen only reads its numbers) ----------
 V.keys = (p) => {
-  const body = el('div'), res = el('div');
+  const body = el('div'), res = el('div'); let keysPaint = 0;
   const n = (v) => (v || 0).toLocaleString();
   const cell = (c) => el('td', {}, `${n(c.req)}`, c.limited ? el('span', { class: 'w-warn' }, ` (${c.limited} limited)`) : null, c.err ? el('span', { class: 'w-bad' }, ` (${c.err} failed)`) : null);
   const when = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -331,6 +331,12 @@ V.keys = (p) => {
     }
     if (s.clients?.length) body.append(section('Who used them today'), el('table', {}, el('thead', {}, el('tr', {}, ['Program', 'For', 'Requests', 'Tokens', 'Accounts used'].map((h) => el('th', {}, h)))), el('tbody', {}, s.clients.map((c) => el('tr', {}, el('td', { class: 'mono' }, c.client), el('td', {}, c.provider), cell(c), el('td', {}, n(c.tok)), el('td', { class: 'muted' }, c.accounts.map((a) => `${a.label} ×${a.req}`).join(', ') || '-'))))));
     if (s.days?.length) body.append(section('Last days'), el('table', {}, el('thead', {}, el('tr', {}, ['Day', 'Groq requests', 'Groq tokens', 'Gemini requests', 'Gemini tokens'].map((h) => el('th', {}, h)))), el('tbody', {}, s.days.map((d) => el('tr', {}, el('td', { class: 'mono' }, d.date), cell(d.groq), el('td', {}, n(d.groq.tok)), cell(d.gemini), el('td', {}, n(d.gemini.tok)))))));
+    const my = ++keysPaint;
+    window.api.call('endpoints:list').then((r) => {
+      if (!r.ok || my !== keysPaint) return;   // a newer repaint is already running
+      body.append(section('AI endpoints on this PC', btn('Copy prompt for all', async () => { const a = await call('endpoints:prompt'); if (a) await copyText(a.data); }, '', { title: 'One prompt describing every endpoint below, to paste into any AI agent' })),
+        el('table', {}, el('thead', {}, el('tr', {}, ['Endpoint', 'Address', 'State', ''].map((h) => el('th', {}, h)))), el('tbody', {}, r.data.map((e) => el('tr', {}, el('td', {}, e.name), el('td', { class: 'mono' }, e.baseUrl), el('td', {}, mark(e.up ? 'ok' : 'warn', e.up ? 'answering' : 'not running')), el('td', { class: 'act' }, btn('Copy prompt', () => copyText(e.prompt))))))));
+    });
     const addr = (pv, tail) => el('div', { class: 'row' }, el('span', { class: 'mono' }, `${base(s.port)}/${pv}/<program-name>${tail}`), btn('Copy', () => copyText(`${base(s.port)}/${pv}/YOURPROGRAM${tail}`)));
     body.append(section('Connect a program'), el('p', { class: 'sub' }, 'Point the program at one of these addresses instead of the provider, give it any dummy key, and put its own name where it says <program-name> so the numbers above show who used what. The gateway adds the real key and moves to the next account by itself. It keeps working when PC Bridge is closed. A program on another PC needs port ' + s.port + ' in its "needs" list.'),
       addr('groq', ''), addr('groq', '/openai/v1'), addr('gemini', ''));

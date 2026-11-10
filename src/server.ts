@@ -12,6 +12,7 @@ import * as programs from './programs';
 import * as apps from './apps';
 import * as envs from './envs';
 import * as keyhub from './keyhub';
+import * as endpoints from './endpoints';
 import { PublicApi, newToken, defaultApi } from './publicapi';
 
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
@@ -279,6 +280,8 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     try { persist(); } catch (err) { p.needs = old; throw err; } return p.needs || [];
   };
   /** Text to paste into any AI session or agent so it knows where to start: the notes file next to the app folder if there is one, else the README. */
+  H['endpoints:list'] = () => endpoints.list();          // UI only (never contains a key)
+  H['endpoints:prompt'] = () => endpoints.promptAll();
   H['notes:prompt'] = () => {
     const root = path.join(__dirname, '..', '..'), notes = path.join(root, '..', 'PC-BRIDGE-NOTES.md'), file = fs.existsSync(notes) ? notes : path.join(root, 'README.md');
     return `Before doing anything, read ${path.resolve(file)}. It holds the project's rules, what is running, the Groq/Gemini key gateway on 127.0.0.1:8795 and how to commit and restart. Follow it exactly. Use the gateway for Groq and Gemini calls and never copy, print or hardcode an API key. If you change something important, update that file.`;
