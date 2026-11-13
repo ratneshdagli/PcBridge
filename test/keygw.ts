@@ -19,6 +19,10 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
     req.resume(); req.on('end', () => {
       if (key === 'gsk_limited_aaaaaaaa') { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '120' }); res.end('{"error":{"message":"Rate limit reached on tokens per day (TPD)"}}'); return; }
       if (key === 'gsk_rejected_bbbbbbbb') { res.writeHead(401); res.end('{"error":"bad key"}'); return; }
+      if (key === 'gsk_busy_eeeeeeee') { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":{"message":"This model is currently experiencing high demand"}}'); return; }
+      if (key === 'gsk_gone_ffffffff') { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"error":{"message":"This model models/x is no longer available to new users"}}'); return; }
+      if (key === 'gsk_hang_gggggggg') return;   // never answers
+      if (key === 'gsk_plain404_hhhhhhh') { res.writeHead(404); res.end('{"error":"no such path"}'); return; }
       res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: 'hi' } }], usage: { total_tokens: 42 } }));
     });
   });
@@ -56,5 +60,18 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   r = await hit(gw2.port, '/groq/x/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"m"}' });
   assert.strictEqual(r.status, 429); assert.ok(/cooling down/.test(r.text), 'second call is answered without asking the provider again');
   assert.strictEqual((gw2.stats() as any).clients[0].limited, 2); await gw2.close();
+  // 7. provider trouble: a busy (503) account, one that lost the model (404) and one that hangs are passed over; the good one answers, and the bad ones are then skipped for that model
+  const gw3 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'busy', key: 'gsk_busy_eeeeeeee' }, { label: 'gone', key: 'gsk_gone_ffffffff' }, { label: 'hang', key: 'gsk_hang_gggggggg' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] }), hosts: { groq: host }, log: () => {}, firstByteMs: 400, budgetMs: 5000 });
+  seen.length = 0; const t = Date.now(); r = await hit(gw3.port, '/groq/jarvis/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"m"}' });
+  assert.strictEqual(r.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_busy_eeeeeeee', 'gsk_gone_ffffffff', 'gsk_hang_gggggggg', 'gsk_good_cccccccc']); assert.ok(Date.now() - t < 3000, 'the hanging account was given up on quickly');
+  seen.length = 0; r = await hit(gw3.port, '/groq/jarvis/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"m"}' });
+  assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'accounts that failed for this model are skipped');
+  seen.length = 0; r = await hit(gw3.port, '/groq/jarvis/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"other"}' });
+  assert.strictEqual(seen[0].key, 'gsk_busy_eeeeeeee', 'a different model still tries every account'); await gw3.close();
+  // 8. all accounts hang: the caller gets a quick 504, not a long wait; a plain 404 (bad path) is passed back at once without trying other accounts
+  const gw4 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'hang', key: 'gsk_hang_gggggggg' }], gemini: [] }), hosts: { groq: host }, log: () => {}, firstByteMs: 300, budgetMs: 2000 });
+  r = await hit(gw4.port, '/groq/x/openai/v1/models'); assert.strictEqual(r.status, 504); await gw4.close();
+  const gw5 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'p', key: 'gsk_plain404_hhhhhhh' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] }), hosts: { groq: host }, log: () => {} });
+  seen.length = 0; r = await hit(gw5.port, '/groq/x/nothing/here'); assert.strictEqual(r.status, 404); assert.strictEqual(seen.length, 1, 'a plain 404 does not burn the other accounts'); await gw5.close();
   fake.close(); console.log('key gateway checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });

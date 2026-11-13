@@ -18,7 +18,7 @@ export const keygwDir = () => path.join(process.env.APPDATA || path.join(os.home
 export interface Cnt { req: number; ok: number; limited: number; err: number; tok: number }
 export interface Day { keys: Record<string, Cnt>; clients: Record<string, Cnt>; pairs: Record<string, Cnt> }
 interface Rec { provider: Provider; label: string; key: string; cool: Map<string, { until: number; why: string }> }   // cool: model (or "*" for the whole key) -> until when it is skipped
-export interface Opts { port?: number; dir?: string; hosts?: Partial<Record<Provider, string>>; log?: (s: string) => void }
+export interface Opts { port?: number; dir?: string; hosts?: Partial<Record<Provider, string>>; log?: (s: string) => void; firstByteMs?: number; budgetMs?: number }
 
 const blank = (): Cnt => ({ req: 0, ok: 0, limited: 0, err: 0, tok: 0 });
 const ymd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;   // this PC's day: what "per day" means on the dashboard
@@ -42,6 +42,8 @@ export async function startGateway(o: Opts = {}) {
   const hosts: Record<Provider, string> = { ...HOSTS, ...(o.hosts || {}) };
   const log = o.log || ((s: string) => console.log(new Date().toISOString().slice(11, 19) + ' ' + s));
   const agent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+  const FIRST_BYTE_MS = o.firstByteMs ?? (Number(process.env.KEYGW_FIRST_BYTE_MS) || 25000);   // a key that has not started answering by then is skipped (streams send headers at once)
+  const BUDGET_MS = o.budgetMs ?? (Number(process.env.KEYGW_BUDGET_MS) || 45000);              // after this much total time no further account is tried: the caller gets the error and can fall back
   const startedAt = Date.now();
 
   // ---- keys: re-read when the file changes, so adding or removing an account needs no restart ----
@@ -87,12 +89,15 @@ export async function startGateway(o: Opts = {}) {
     k.cool.set(model, { until: Date.now() + ms, why: daily ? 'daily limit' : 'rate limit' });
   }
 
+  /** Skip this account for this model for a while (a provider-side problem, not a limit of ours). */
+  const rest = (k: Rec, model: string, ms: number, why: string) => k.cool.set(model, { until: Date.now() + ms, why });
   function call(p: Provider, k: Rec, method: string, upPath: string, hdrs: http.OutgoingHttpHeaders, body: Buffer): Promise<http.IncomingMessage> {
     return new Promise((resolve, reject) => {
       const u = new URL(hosts[p]), auth = p === 'gemini' && !upPath.startsWith('/v1beta/openai') ? { 'x-goog-api-key': k.key } : { authorization: 'Bearer ' + k.key };
       const r = (u.protocol === 'http:' ? http : https).request({ hostname: u.hostname, port: u.port ? Number(u.port) : undefined, path: upPath, method, agent: u.protocol === 'http:' ? undefined : agent, timeout: 180000,
-        headers: { ...hdrs, host: u.host, 'accept-encoding': 'identity', 'content-length': body.length, ...auth } }, resolve);
-      r.on('error', reject); r.on('timeout', () => r.destroy(new Error('upstream timeout')));
+        headers: { ...hdrs, host: u.host, 'accept-encoding': 'identity', 'content-length': body.length, ...auth } }, (res) => { clearTimeout(slow); resolve(res); });
+      const slow = setTimeout(() => r.destroy(new Error(`no answer within ${Math.round(FIRST_BYTE_MS / 1000)}s`)), FIRST_BYTE_MS);
+      r.on('error', (e) => { clearTimeout(slow); reject(e); }); r.on('timeout', () => r.destroy(new Error('upstream timeout')));
       r.end(body);
     });
   }
@@ -146,16 +151,24 @@ export async function startGateway(o: Opts = {}) {
       if (m) model = decodeURIComponent(m[1]); else if (body.length && body.length < 8e6 && /json/.test(String(req.headers['content-type']))) { try { model = String(JSON.parse(body.toString('utf8')).model || '*'); } catch { /* not JSON */ } }
       const hdrs: http.OutgoingHttpHeaders = {}; for (const [k, v] of Object.entries(req.headers)) if (!DROP.has(k)) hdrs[k] = v;
 
-      const tried = new Set<Rec>(), t0 = Date.now(); let last: { status: number; headers: http.IncomingHttpHeaders; text: string } | null = null;
+      const tried = new Set<Rec>(), t0 = Date.now(); let last: { status: number; headers: http.IncomingHttpHeaders; text: string } | null = null, failure = '';
       for (;;) {
+        if (Date.now() - t0 > BUDGET_MS) { log(`${p} ${who}: time budget used up (${model})`); break; }
         const k = pick(p, model, tried); if (!k) break; tried.add(k);
         let up: http.IncomingMessage;
         try { up = await call(p, k, req.method || 'GET', upPath, hdrs, body); }
-        catch (e: any) { bump(today().clients, `${who}|${p}`, 'err'); bump(today().keys, `${p}/${k.label}`, 'err'); dirty = true; log(`${p} ${who} unreachable: ${e.message}`); return send(res, 502, { error: { message: 'upstream unreachable: ' + e.message, type: 'keygw_upstream' } }); }
+        catch (e: any) { rest(k, model, 30000, 'no answer'); bump(today().keys, `${p}/${k.label}`, 'err'); dirty = true; failure = e.message; log(`${p} ${who} ${k.label}: ${e.message} -> next account`); continue; }
         const st = up.statusCode || 502, d = today();
         if (st === 429 || st === 401 || st === 403) {   // this account cannot serve it right now: remember why, try the next one
           const text = await readText(up, 65536); cool(k, st, model, up.headers, text);
           bump(d.keys, `${p}/${k.label}`, st === 429 ? 'limited' : 'err'); dirty = true; last = { status: st, headers: up.headers, text };
+          log(`${p} ${who} ${st} on ${k.label} (${model}) -> next account`); continue;
+        }
+        if (st >= 500 && st !== 501 || st === 404) {   // provider trouble (overloaded) or "this model is not available to this account": try another account, and skip this one for this model for a while
+          const text = await readText(up, 65536), gone = st === 404 && /no longer available|not available|not supported|not found for api version/i.test(text);
+          if (st === 404 && !gone) { res.writeHead(404, { 'content-type': String(up.headers['content-type'] || 'application/json') }); res.end(text); bump(d.clients, `${who}|${p}`, 'err'); dirty = true; return; }   // a plain not-found (bad path): not an account problem
+          rest(k, model, gone ? 6 * 3600000 : st === 503 ? 15000 : 30000, gone ? 'model not available to this account' : `provider error ${st}`);
+          bump(d.keys, `${p}/${k.label}`, 'err'); dirty = true; last = { status: st, headers: up.headers, text };
           log(`${p} ${who} ${st} on ${k.label} (${model}) -> next account`); continue;
         }
         const out = { ...up.headers }; delete out['connection']; delete out['keep-alive']; delete out['transfer-encoding'];
@@ -172,6 +185,7 @@ export async function startGateway(o: Opts = {}) {
         up.pipe(res); return;
       }
       // every account is cooling or failed
+      if (!last && failure) { bump(today().clients, `${who}|${p}`, 'err'); dirty = true; return send(res, 504, { error: { message: `${p} did not answer: ${failure}`, type: 'keygw_upstream' } }); }
       const dd = today(), soon = Math.max(1, Math.ceil((Math.min(...pool[p].map((k) => waitOf(k, model))) - Date.now()) / 1000));
       bump(dd.clients, `${who}|${p}`, last && last.status !== 429 ? 'err' : 'limited'); dirty = true;
       log(`${p} ${who}: all ${pool[p].length} accounts limited (${model}), first free in ${soon}s`);
