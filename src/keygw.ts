@@ -43,6 +43,8 @@ export async function startGateway(o: Opts = {}) {
   const log = o.log || ((s: string) => console.log(new Date().toISOString().slice(11, 19) + ' ' + s));
   const agent = new https.Agent({ keepAlive: true, maxSockets: 64 });
   const FIRST_BYTE_MS = o.firstByteMs ?? (Number(process.env.KEYGW_FIRST_BYTE_MS) || 25000);   // a key that has not started answering by then is skipped (streams send headers at once)
+  const SMALL_FIRST_BYTE_MS = Number(process.env.KEYGW_SMALL_FIRST_BYTE_MS) || 12000;           // same, for small requests (under 16 KB), e.g. a voice assistant's short question
+  const seenModels: Record<Provider, Set<string>> = { groq: new Set(), gemini: new Set() };      // models callers asked for, so /_models can say how many accounts can serve each right now
   const BUDGET_MS = o.budgetMs ?? (Number(process.env.KEYGW_BUDGET_MS) || 45000);              // after this much total time no further account is tried: the caller gets the error and can fall back
   const startedAt = Date.now();
 
@@ -91,12 +93,12 @@ export async function startGateway(o: Opts = {}) {
 
   /** Skip this account for this model for a while (a provider-side problem, not a limit of ours). */
   const rest = (k: Rec, model: string, ms: number, why: string) => k.cool.set(model, { until: Date.now() + ms, why });
-  function call(p: Provider, k: Rec, method: string, upPath: string, hdrs: http.OutgoingHttpHeaders, body: Buffer): Promise<http.IncomingMessage> {
+  function call(p: Provider, k: Rec, method: string, upPath: string, hdrs: http.OutgoingHttpHeaders, body: Buffer, firstByte = FIRST_BYTE_MS): Promise<http.IncomingMessage> {
     return new Promise((resolve, reject) => {
       const u = new URL(hosts[p]), auth = p === 'gemini' && !upPath.startsWith('/v1beta/openai') ? { 'x-goog-api-key': k.key } : { authorization: 'Bearer ' + k.key };
       const r = (u.protocol === 'http:' ? http : https).request({ hostname: u.hostname, port: u.port ? Number(u.port) : undefined, path: upPath, method, agent: u.protocol === 'http:' ? undefined : agent, timeout: 180000,
         headers: { ...hdrs, host: u.host, 'accept-encoding': 'identity', 'content-length': body.length, ...auth } }, (res) => { clearTimeout(slow); resolve(res); });
-      const slow = setTimeout(() => r.destroy(new Error(`no answer within ${Math.round(FIRST_BYTE_MS / 1000)}s`)), FIRST_BYTE_MS);
+      const slow = setTimeout(() => r.destroy(new Error(`no answer within ${Math.round(firstByte / 1000)}s`)), firstByte);
       r.on('error', (e) => { clearTimeout(slow); reject(e); }); r.on('timeout', () => r.destroy(new Error('upstream timeout')));
       r.end(body);
     });
@@ -115,7 +117,9 @@ export async function startGateway(o: Opts = {}) {
       const accounts = Object.entries(d.pairs).filter(([pk]) => pk.startsWith(client + '|' + provider + '/')).map(([pk, pc]) => ({ label: pk.slice(client.length + provider.length + 2), req: pc.req }));
       return { client, provider, ...c, accounts };
     }).sort((a, b) => b.req - a.req);
-    return { now, date: ymd(), port: (server.address() as any)?.port, pid: process.pid, startedAt, keysFile, providers, clients, days: daysOf(stats.days) };
+    const models: Record<string, unknown[]> = {};
+    for (const p of PROVIDERS) models[p] = [...seenModels[p]].map((m) => ({ model: m, usable: pool[p].filter((k) => waitOf(k, m) <= now).length, total: pool[p].length }));
+    return { now, date: ymd(), models, port: (server.address() as any)?.port, pid: process.pid, startedAt, keysFile, providers, clients, days: daysOf(stats.days) };
   }
 
   async function check() {
@@ -138,6 +142,7 @@ export async function startGateway(o: Opts = {}) {
       const url = new URL(req.url || '/', 'http://x'), parts = url.pathname.split('/').filter(Boolean);
       if (parts[0] === '_health') return send(res, 200, { ok: true });
       if (parts[0] === '_stats') return send(res, 200, view());
+      if (parts[0] === '_models') return send(res, 200, view().models);   // per provider: model -> how many accounts can serve it right now
       if (parts[0] === '_check' && req.method === 'POST') return send(res, 200, await check());
       const p = parts[0] as Provider, who = (parts[1] || '').toLowerCase();
       if (!PROVIDERS.includes(p) || !/^[a-z0-9._-]{1,40}$/.test(who)) return send(res, 404, { error: 'use /groq/<program-name>/... or /gemini/<program-name>/... (the rest is the provider\'s normal path)' });
@@ -149,6 +154,7 @@ export async function startGateway(o: Opts = {}) {
       const upPath = '/' + parts.slice(2).join('/') + (q.toString() ? '?' + q.toString() : '');
       let model = '*'; const m = /models\/([^:/?]+)/.exec(upPath);
       if (m) model = decodeURIComponent(m[1]); else if (body.length && body.length < 8e6 && /json/.test(String(req.headers['content-type']))) { try { model = String(JSON.parse(body.toString('utf8')).model || '*'); } catch { /* not JSON */ } }
+      if (model !== '*' && model.length <= 80 && seenModels[p].size < 60) seenModels[p].add(model);
       const hdrs: http.OutgoingHttpHeaders = {}; for (const [k, v] of Object.entries(req.headers)) if (!DROP.has(k)) hdrs[k] = v;
 
       const tried = new Set<Rec>(), t0 = Date.now(); let last: { status: number; headers: http.IncomingHttpHeaders; text: string } | null = null, failure = '';
@@ -156,7 +162,9 @@ export async function startGateway(o: Opts = {}) {
         if (Date.now() - t0 > BUDGET_MS) { log(`${p} ${who}: time budget used up (${model})`); break; }
         const k = pick(p, model, tried); if (!k) break; tried.add(k);
         let up: http.IncomingMessage;
-        try { up = await call(p, k, req.method || 'GET', upPath, hdrs, body); }
+        // a small request should start answering quickly, and no attempt may run past the total budget
+        const wait = Math.max(1000, Math.min(body.length < 16384 ? Math.min(FIRST_BYTE_MS, SMALL_FIRST_BYTE_MS) : FIRST_BYTE_MS, BUDGET_MS - (Date.now() - t0)));
+        try { up = await call(p, k, req.method || 'GET', upPath, hdrs, body, wait); }
         catch (e: any) { rest(k, model, 30000, 'no answer'); bump(today().keys, `${p}/${k.label}`, 'err'); dirty = true; failure = e.message; log(`${p} ${who} ${k.label}: ${e.message} -> next account`); continue; }
         const st = up.statusCode || 502, d = today();
         if (st === 429 || st === 401 || st === 403) {   // this account cannot serve it right now: remember why, try the next one

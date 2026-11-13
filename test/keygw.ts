@@ -67,10 +67,14 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   seen.length = 0; r = await hit(gw3.port, '/groq/jarvis/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"m"}' });
   assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'accounts that failed for this model are skipped');
   seen.length = 0; r = await hit(gw3.port, '/groq/jarvis/openai/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"other"}' });
-  assert.strictEqual(seen[0].key, 'gsk_busy_eeeeeeee', 'a different model still tries every account'); await gw3.close();
+  assert.strictEqual(seen[0].key, 'gsk_busy_eeeeeeee', 'a different model still tries every account');
+  const mods = (JSON.parse((await hit(gw3.port, '/_models')).text).groq as any[]).find((x) => x.model === 'm'); assert.deepStrictEqual([mods.usable, mods.total], [1, 4], '/_models says how many accounts can serve a model right now'); await gw3.close();
   // 8. all accounts hang: the caller gets a quick 504, not a long wait; a plain 404 (bad path) is passed back at once without trying other accounts
   const gw4 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'hang', key: 'gsk_hang_gggggggg' }], gemini: [] }), hosts: { groq: host }, log: () => {}, firstByteMs: 300, budgetMs: 2000 });
   r = await hit(gw4.port, '/groq/x/openai/v1/models'); assert.strictEqual(r.status, 504); await gw4.close();
+  // the total budget is a real ceiling: two silent accounts with a long first-byte limit still end near the budget, not at 2 x the limit
+  const gw6 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'h1', key: 'gsk_hang_gggggggg' }, { label: 'h2', key: 'gsk_hang_gggggggg' }], gemini: [] }), hosts: { groq: host }, log: () => {}, firstByteMs: 3000, budgetMs: 1500 });
+  const t6 = Date.now(); r = await hit(gw6.port, '/groq/x/openai/v1/models'); assert.strictEqual(r.status, 504); assert.ok(Date.now() - t6 < 2600, 'ended near the budget (' + (Date.now() - t6) + ' ms)'); await gw6.close();
   const gw5 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'p', key: 'gsk_plain404_hhhhhhh' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] }), hosts: { groq: host }, log: () => {} });
   seen.length = 0; r = await hit(gw5.port, '/groq/x/nothing/here'); assert.strictEqual(r.status, 404); assert.strictEqual(seen.length, 1, 'a plain 404 does not burn the other accounts'); await gw5.close();
   fake.close(); console.log('key gateway checks passed');
