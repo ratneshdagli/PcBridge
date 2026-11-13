@@ -28,7 +28,8 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   });
   await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
   const host = `http://127.0.0.1:${(fake.address() as any).port}`;
-  const mk = (keys: unknown) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'keygw-')); fs.writeFileSync(path.join(d, 'keys.json'), JSON.stringify(keys)); return d; };
+  const made: string[] = [];   // temp folders of this run, removed at the end
+  const mk = (keys: unknown) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'keygw-')); made.push(d); fs.writeFileSync(path.join(d, 'keys.json'), JSON.stringify(keys)); return d; };
   const all = { groq: [{ label: 'limited', key: 'gsk_limited_aaaaaaaa' }, { label: 'rejected', key: 'gsk_rejected_bbbbbbbb' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [{ label: 'g1', key: 'AQ.gemini_dddddddd' }] };
   const gw = await startGateway({ port: 0, dir: mk(all), hosts: { groq: host, gemini: host }, log: () => {} });
   const chat = (who: string) => hit(gw.port, `/groq/${who}/openai/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"m"}' });
@@ -96,5 +97,5 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   const gw8 = await startGateway({ port: 0, dir: d8, hosts: { groq: host }, log: () => {} });
   seen.length = 0; f = await hitFull(gw8.port, '/groq/news' + P); assert.strictEqual(f.status, 429); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_limited_aaaaaaaa'], 'the reserved account is never used by other programs');
   seen.length = 0; f = await hitFull(gw8.port, '/groq/relay1' + P); assert.strictEqual(f.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'the pinned program still uses it'); await gw8.close();
-  fake.close(); console.log('key gateway checks passed');
+  fake.close(); for (const d of made) fs.rmSync(d, { recursive: true, force: true }); console.log('key gateway checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });
