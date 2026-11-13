@@ -90,5 +90,11 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   seen.length = 0; f = await hitFull(gw7.port, '/groq/news' + P); f = await hitFull(gw7.port, '/groq/news' + P); assert.ok(seen.some((s) => s.key === 'gsk_limited_aaaaaaaa') && f.status === 200, 'other programs still rotate and fail over past a limited account');
   f = await hitFull(gw7.port, '/groq/relay3' + P); assert.strictEqual(f.status, 503, 'pinned to an unknown account: an error, never a silent switch to rotation');
   assert.ok(!/gsk_|AQ\./.test(JSON.stringify(gw7.stats())), 'no key in stats'); await gw7.close();
+  // 10. "reserve": the pinned account is used by its program only; everyone else rotates over the rest
+  const d8 = mk({ groq: [{ label: 'limited', key: 'gsk_limited_aaaaaaaa' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] });
+  fs.writeFileSync(path.join(d8, 'pins.json'), JSON.stringify({ relay1: { groq: 'good', reserve: true } }));
+  const gw8 = await startGateway({ port: 0, dir: d8, hosts: { groq: host }, log: () => {} });
+  seen.length = 0; f = await hitFull(gw8.port, '/groq/news' + P); assert.strictEqual(f.status, 429); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_limited_aaaaaaaa'], 'the reserved account is never used by other programs');
+  seen.length = 0; f = await hitFull(gw8.port, '/groq/relay1' + P); assert.strictEqual(f.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'the pinned program still uses it'); await gw8.close();
   fake.close(); console.log('key gateway checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });

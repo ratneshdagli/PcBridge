@@ -66,7 +66,7 @@ export async function startGateway(o: Opts = {}) {
   }
 
   // ---- pins: a program named in pins.json uses ONE fixed account and gets the provider's answer back untouched (no rotation, no retry) ----
-  // pins.json: {"relay1": {"groq": "<account label>"}}   Remove the entry (or the file) to switch it off; edits are picked up within seconds.
+  // pins.json: {"relay1": {"groq": "<account label>", "reserve": true}}   ("reserve" also takes that account out of every other program's rotation.)   Remove the entry (or the file) to switch it off; edits are picked up within seconds.
   const pinsFile = path.join(dir, 'pins.json'); let pins: Record<string, Partial<Record<Provider, string>>> = {}, pinsMtime = -1, pinsChecked = 0;
   function loadPins() {
     if (Date.now() - pinsChecked < 2000) return; pinsChecked = Date.now();
@@ -90,9 +90,11 @@ export async function startGateway(o: Opts = {}) {
   // ---- choosing and cooling keys ----
   const waitOf = (k: Rec, model: string) => Math.max(k.cool.get('*')?.until ?? 0, k.cool.get(model)?.until ?? 0);
   /** The usable key with the fewest calls today (spreads the load, so per-minute limits are hit later). */
-  function pick(p: Provider, model: string, tried: Set<Rec>): Rec | undefined {
+  function pick(p: Provider, model: string, tried: Set<Rec>, who = ''): Rec | undefined {
     const now = Date.now(), d = today().keys;
-    return pool[p].filter((k) => !tried.has(k) && waitOf(k, model) <= now).sort((a, b) => (d[`${p}/${a.label}`]?.req ?? 0) - (d[`${p}/${b.label}`]?.req ?? 0))[0];
+    // an account a pin marks "reserve": true is used only by the pinned program, so it drops out of everyone else's rotation
+    const reservedFor = (label: string) => Object.entries(pins).some(([prog, e]) => prog !== who && (e as any)?.reserve === true && e[p] === label);
+    return pool[p].filter((k) => !tried.has(k) && waitOf(k, model) <= now && !reservedFor(k.label)).sort((a, b) => (d[`${p}/${a.label}`]?.req ?? 0) - (d[`${p}/${b.label}`]?.req ?? 0))[0];
   }
   function cool(k: Rec, st: number, model: string, h: http.IncomingHttpHeaders, text: string) {
     if (st !== 429) { k.cool.set('*', { until: Date.now() + 600000, why: st === 401 ? 'key rejected (401)' : 'key refused (403)' }); return; }   // retried after 10 min, in case it was a blip
@@ -172,7 +174,7 @@ export async function startGateway(o: Opts = {}) {
       const tried = new Set<Rec>(), t0 = Date.now(); let last: { status: number; headers: http.IncomingHttpHeaders; text: string } | null = null, failure = '';
       for (;;) {
         if (Date.now() - t0 > BUDGET_MS) { log(`${p} ${who}: time budget used up (${model})`); break; }
-        const k = pin ? pool[p].find((x) => x.label === pin) : pick(p, model, tried);
+        const k = pin ? pool[p].find((x) => x.label === pin) : pick(p, model, tried, who);
         if (pin && !k) return send(res, 503, { error: { message: `${who} is pinned to the ${p} account "${pin}", which is not in keys.json`, type: 'keygw_pin_missing' } });
         if (!k) break; tried.add(k);
         let up: http.IncomingMessage;
