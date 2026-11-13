@@ -65,6 +65,17 @@ export async function startGateway(o: Opts = {}) {
     } catch (e: any) { log('keys.json unreadable: ' + e.message); }
   }
 
+  // ---- pins: a program named in pins.json uses ONE fixed account and gets the provider's answer back untouched (no rotation, no retry) ----
+  // pins.json: {"relay1": {"groq": "<account label>"}}   Remove the entry (or the file) to switch it off; edits are picked up within seconds.
+  const pinsFile = path.join(dir, 'pins.json'); let pins: Record<string, Partial<Record<Provider, string>>> = {}, pinsMtime = -1, pinsChecked = 0;
+  function loadPins() {
+    if (Date.now() - pinsChecked < 2000) return; pinsChecked = Date.now();
+    let m = 0; try { m = fs.statSync(pinsFile).mtimeMs; } catch { /* no file: nothing pinned */ }
+    if (m === pinsMtime) return; pinsMtime = m;
+    try { const j = m ? JSON.parse(fs.readFileSync(pinsFile, 'utf8').replace(/^﻿/, '')) : {}; pins = j && typeof j === 'object' && !Array.isArray(j) ? j : {}; log('pinned programs: ' + (Object.keys(pins).join(', ') || 'none')); }
+    catch (e: any) { log('pins.json unreadable: ' + e.message); }
+  }
+
   // ---- numbers: kept in memory, saved every few seconds, 45 days ----
   let stats: { days: Record<string, Day> } = { days: {} }, dirty = false;
   try { stats = JSON.parse(fs.readFileSync(statsFile, 'utf8')); if (!stats.days) stats = { days: {} }; } catch { /* first run */ }
@@ -138,7 +149,7 @@ export async function startGateway(o: Opts = {}) {
     try {
       // only programs on this PC: a web page in a browser (it sends Origin) or a rebinding trick (odd Host) is refused
       if (req.headers.origin || !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(String(req.headers.host || ''))) return send(res, 403, { error: 'local programs only' });
-      loadKeys();
+      loadKeys(); loadPins();
       const url = new URL(req.url || '/', 'http://x'), parts = url.pathname.split('/').filter(Boolean);
       if (parts[0] === '_health') return send(res, 200, { ok: true });
       if (parts[0] === '_stats') return send(res, 200, view());
@@ -157,22 +168,26 @@ export async function startGateway(o: Opts = {}) {
       if (model !== '*' && model.length <= 80 && seenModels[p].size < 60) seenModels[p].add(model);
       const hdrs: http.OutgoingHttpHeaders = {}; for (const [k, v] of Object.entries(req.headers)) if (!DROP.has(k)) hdrs[k] = v;
 
+      const pin = pins[who]?.[p];   // set: this program always uses that one account and the answer is passed through as it is
       const tried = new Set<Rec>(), t0 = Date.now(); let last: { status: number; headers: http.IncomingHttpHeaders; text: string } | null = null, failure = '';
       for (;;) {
         if (Date.now() - t0 > BUDGET_MS) { log(`${p} ${who}: time budget used up (${model})`); break; }
-        const k = pick(p, model, tried); if (!k) break; tried.add(k);
+        const k = pin ? pool[p].find((x) => x.label === pin) : pick(p, model, tried);
+        if (pin && !k) return send(res, 503, { error: { message: `${who} is pinned to the ${p} account "${pin}", which is not in keys.json`, type: 'keygw_pin_missing' } });
+        if (!k) break; tried.add(k);
         let up: http.IncomingMessage;
         // a small request should start answering quickly, and no attempt may run past the total budget
-        const wait = Math.max(1000, Math.min(body.length < 16384 ? Math.min(FIRST_BYTE_MS, SMALL_FIRST_BYTE_MS) : FIRST_BYTE_MS, BUDGET_MS - (Date.now() - t0)));
+        const wait = pin ? 180000 : Math.max(1000, Math.min(body.length < 16384 ? Math.min(FIRST_BYTE_MS, SMALL_FIRST_BYTE_MS) : FIRST_BYTE_MS, BUDGET_MS - (Date.now() - t0)));
         try { up = await call(p, k, req.method || 'GET', upPath, hdrs, body, wait); }
-        catch (e: any) { rest(k, model, 30000, 'no answer'); bump(today().keys, `${p}/${k.label}`, 'err'); dirty = true; failure = e.message; log(`${p} ${who} ${k.label}: ${e.message} -> next account`); continue; }
+        catch (e: any) { if (pin) { bump(today().keys, `${p}/${k.label}`, 'err'); bump(today().clients, `${who}|${p}`, 'err'); dirty = true; log(`${p} ${who} (pinned) unreachable: ${e.message}`); return send(res, 502, { error: { message: 'upstream unreachable: ' + e.message, type: 'keygw_upstream' } }); }
+          rest(k, model, 30000, 'no answer'); bump(today().keys, `${p}/${k.label}`, 'err'); dirty = true; failure = e.message; log(`${p} ${who} ${k.label}: ${e.message} -> next account`); continue; }
         const st = up.statusCode || 502, d = today();
-        if (st === 429 || st === 401 || st === 403) {   // this account cannot serve it right now: remember why, try the next one
+        if (!pin && (st === 429 || st === 401 || st === 403)) {   // this account cannot serve it right now: remember why, try the next one
           const text = await readText(up, 65536); cool(k, st, model, up.headers, text);
           bump(d.keys, `${p}/${k.label}`, st === 429 ? 'limited' : 'err'); dirty = true; last = { status: st, headers: up.headers, text };
           log(`${p} ${who} ${st} on ${k.label} (${model}) -> next account`); continue;
         }
-        if (st >= 500 && st !== 501 || st === 404) {   // provider trouble (overloaded) or "this model is not available to this account": try another account, and skip this one for this model for a while
+        if (!pin && (st >= 500 && st !== 501 || st === 404)) {   // provider trouble (overloaded) or "this model is not available to this account": try another account, and skip this one for this model for a while
           const text = await readText(up, 65536), gone = st === 404 && /no longer available|not available|not supported|not found for api version/i.test(text);
           if (st === 404 && !gone) { res.writeHead(404, { 'content-type': String(up.headers['content-type'] || 'application/json') }); res.end(text); bump(d.clients, `${who}|${p}`, 'err'); dirty = true; return; }   // a plain not-found (bad path): not an account problem
           rest(k, model, gone ? 6 * 3600000 : st === 503 ? 15000 : 30000, gone ? 'model not available to this account' : `provider error ${st}`);
@@ -185,7 +200,7 @@ export async function startGateway(o: Opts = {}) {
         up.on('data', (c: Buffer) => { tail = (tail + c.toString('latin1')).slice(-16384); });
         const fin = () => {
           if (done) return; done = true;
-          const t = [...tail.matchAll(/"(?:total_tokens|totalTokenCount)"\s*:\s*(\d+)/g)].pop(), tok = t ? Number(t[1]) : 0, o2 = st < 400 ? 'ok' : 'err', dd = today();
+          const t = [...tail.matchAll(/"(?:total_tokens|totalTokenCount)"\s*:\s*(\d+)/g)].pop(), tok = t ? Number(t[1]) : 0, o2 = st < 400 ? 'ok' : st === 429 ? 'limited' : 'err', dd = today();
           bump(dd.keys, `${p}/${k.label}`, o2, tok); bump(dd.clients, `${who}|${p}`, o2, tok); bump(dd.pairs, `${who}|${p}/${k.label}`, o2, tok); dirty = true;
           log(`${p} ${who} ${st} ${model} via ${k.label} ${Date.now() - t0}ms${tok ? ' ' + tok + ' tok' : ''}`);
         };

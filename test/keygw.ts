@@ -17,13 +17,13 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   const fake = http.createServer((req, res) => {
     const key = String(req.headers['x-goog-api-key'] || '').trim() || String(req.headers.authorization || '').replace('Bearer ', ''); seen.push({ url: req.url || '', key });
     req.resume(); req.on('end', () => {
-      if (key === 'gsk_limited_aaaaaaaa') { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '120' }); res.end('{"error":{"message":"Rate limit reached on tokens per day (TPD)"}}'); return; }
+      if (key === 'gsk_limited_aaaaaaaa') { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '120', 'x-ratelimit-remaining-tokens': '0' }); res.end('{"error":{"message":"Rate limit reached on tokens per day (TPD)"}}'); return; }
       if (key === 'gsk_rejected_bbbbbbbb') { res.writeHead(401); res.end('{"error":"bad key"}'); return; }
       if (key === 'gsk_busy_eeeeeeee') { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":{"message":"This model is currently experiencing high demand"}}'); return; }
       if (key === 'gsk_gone_ffffffff') { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"error":{"message":"This model models/x is no longer available to new users"}}'); return; }
       if (key === 'gsk_hang_gggggggg') return;   // never answers
       if (key === 'gsk_plain404_hhhhhhh') { res.writeHead(404); res.end('{"error":"no such path"}'); return; }
-      res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: 'hi' } }], usage: { total_tokens: 42 } }));
+      res.writeHead(200, { 'content-type': 'application/json', 'x-ratelimit-limit-tokens': '8000' }); res.end(JSON.stringify({ choices: [{ message: { content: 'hi' } }], usage: { total_tokens: 42 } }));
     });
   });
   await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
@@ -77,5 +77,18 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   const t6 = Date.now(); r = await hit(gw6.port, '/groq/x/openai/v1/models'); assert.strictEqual(r.status, 504); assert.ok(Date.now() - t6 < 2600, 'ended near the budget (' + (Date.now() - t6) + ' ms)'); await gw6.close();
   const gw5 = await startGateway({ port: 0, dir: mk({ groq: [{ label: 'p', key: 'gsk_plain404_hhhhhhh' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] }), hosts: { groq: host }, log: () => {} });
   seen.length = 0; r = await hit(gw5.port, '/groq/x/nothing/here'); assert.strictEqual(r.status, 404); assert.strictEqual(seen.length, 1, 'a plain 404 does not burn the other accounts'); await gw5.close();
+  // 9. a pinned program (pins.json) always uses its one account and gets the provider's answer untouched; everyone else still rotates
+  const hitFull = (port: number, p: string) => new Promise<{ status: number; headers: http.IncomingHttpHeaders; text: string }>((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: p, method: 'POST', headers: { 'content-type': 'application/json' } }, (x) => { let s = ''; x.on('data', (c) => (s += c)); x.on('end', () => resolve({ status: x.statusCode || 0, headers: x.headers, text: s })); }); q.on('error', reject); q.end('{"model":"m"}'); });
+  const d7 = mk({ groq: [{ label: 'limited', key: 'gsk_limited_aaaaaaaa' }, { label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] });
+  fs.writeFileSync(path.join(d7, 'pins.json'), JSON.stringify({ relay1: { groq: 'limited' }, relay2: { groq: 'good' }, relay3: { groq: 'nope' } }));
+  const gw7 = await startGateway({ port: 0, dir: d7, hosts: { groq: host }, log: () => {} }), P = '/openai/v1/chat/completions';
+  seen.length = 0; let f = await hitFull(gw7.port, '/groq/relay1' + P);
+  assert.strictEqual(f.status, 429); assert.strictEqual(f.headers['retry-after'], '120'); assert.strictEqual(f.headers['x-ratelimit-remaining-tokens'], '0'); assert.ok(/tokens per day/.test(f.text), 'body untouched');
+  f = await hitFull(gw7.port, '/groq/relay1' + P); assert.strictEqual(f.status, 429); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_limited_aaaaaaaa', 'gsk_limited_aaaaaaaa'], 'pinned: no failover, and asked again every time');
+  seen.length = 0; f = await hitFull(gw7.port, '/groq/relay2' + P); assert.strictEqual(f.status, 200); assert.strictEqual(f.headers['x-ratelimit-limit-tokens'], '8000', 'rate-limit headers pass through'); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc']);
+  seen.length = 0; f = await hitFull(gw7.port, '/groq/news' + P); assert.strictEqual(f.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'other programs still pick the least-used account');
+  seen.length = 0; f = await hitFull(gw7.port, '/groq/news' + P); f = await hitFull(gw7.port, '/groq/news' + P); assert.ok(seen.some((s) => s.key === 'gsk_limited_aaaaaaaa') && f.status === 200, 'other programs still rotate and fail over past a limited account');
+  f = await hitFull(gw7.port, '/groq/relay3' + P); assert.strictEqual(f.status, 503, 'pinned to an unknown account: an error, never a silent switch to rotation');
+  assert.ok(!/gsk_|AQ\./.test(JSON.stringify(gw7.stats())), 'no key in stats'); await gw7.close();
   fake.close(); console.log('key gateway checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });
