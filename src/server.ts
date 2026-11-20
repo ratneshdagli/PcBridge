@@ -314,6 +314,12 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['keys:check'] = () => keyhub.check();
   H['keys:autostart'] = (on: boolean) => keyhub.setAutostart(on === true);
   H['keys:reveal'] = () => keyhub.reveal();
+  // phone / remote access (UI only: the token is never served by the token API)
+  H['remote:status'] = () => keyhub.remoteStatus();
+  H['remote:set'] = (on: boolean) => keyhub.remoteSet(!!on);
+  H['remote:rotate'] = () => keyhub.remoteRotate();
+  H['remote:kill'] = () => { keyhub.remoteSet(false); keyhub.remoteRotate(); return true; };   // off + new token, so the old one can never be used again
+  H['remote:token'] = () => keyhub.remoteToken();
   H['net:check'] = async (urls: unknown, program?: string, tries?: number) => {   // read-only: DNS + a few GETs from the other PC, to find flaky outbound internet
     const list = (Array.isArray(urls) ? urls : []).map(String);
     if (!list.length || list.length > 8) throw new Error('urls: give 1 to 8 web addresses');

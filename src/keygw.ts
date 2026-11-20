@@ -3,6 +3,7 @@
 // moves to the next account when one hits a limit, and counts every call per day, per account and per program.
 // It is its own process (PC Bridge only starts it and shows its numbers), so the keys keep working when PC Bridge is closed.
 // Only the two fixed provider hosts are ever contacted, only from this PC (loopback), and a key never appears in any answer or log line.
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
@@ -12,13 +13,14 @@ import * as path from 'path';
 export type Provider = 'groq' | 'gemini';
 export const PROVIDERS: Provider[] = ['groq', 'gemini'];
 export const KEYGW_PORT = 8795;
+export const REMOTE_PORT = 8796;   // loopback listener a tunnel (Tailscale Funnel) points at; needs a bearer token, see remote.json
 const HOSTS: Record<Provider, string> = { groq: 'https://api.groq.com', gemini: 'https://generativelanguage.googleapis.com' };
 export const keygwDir = () => path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'pc-bridge', 'keygw');
 
 export interface Cnt { req: number; ok: number; limited: number; err: number; tok: number }
 export interface Day { keys: Record<string, Cnt>; clients: Record<string, Cnt>; pairs: Record<string, Cnt> }
 interface Rec { provider: Provider; label: string; key: string; cool: Map<string, { until: number; why: string }> }   // cool: model (or "*" for the whole key) -> until when it is skipped
-export interface Opts { port?: number; dir?: string; hosts?: Partial<Record<Provider, string>>; log?: (s: string) => void; firstByteMs?: number; budgetMs?: number }
+export interface Opts { port?: number; dir?: string; hosts?: Partial<Record<Provider, string>>; log?: (s: string) => void; firstByteMs?: number; budgetMs?: number; remotePort?: number }
 
 const blank = (): Cnt => ({ req: 0, ok: 0, limited: 0, err: 0, tok: 0 });
 const ymd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;   // this PC's day: what "per day" means on the dashboard
@@ -220,7 +222,39 @@ export async function startGateway(o: Opts = {}) {
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(o.port ?? KEYGW_PORT, '127.0.0.1', () => resolve()); });
   loadKeys(); log(`key gateway on http://127.0.0.1:${(server.address() as any).port}  (keys: ${keysFile})`);
-  return { port: (server.address() as any).port as number, stats: view, check, close: () => new Promise<void>((r) => { clearInterval(saver); dirty = true; save(); agent.destroy(); server.close(() => r()); server.closeAllConnections?.(); }) };
+
+  // ---- remote access (phone, from anywhere): only when remote.json says enabled, only with its bearer token, only /groq/... and /gemini/... (never the stats or key-check routes) ----
+  // remote.json: {"enabled": true, "token": "pcb_...", "rpm": 120}. PC Bridge creates it; "enabled": false (or deleting the file) is the kill switch and takes effect at once.
+  const remoteFile = path.join(dir, 'remote.json'); let remote: { enabled?: boolean; token?: string; rpm?: number } = {}, remoteM = -1, remoteChecked = 0;
+  const hits: number[] = [], fails: number[] = [], recent = (a: number[]) => { const c = Date.now() - 60000; while (a.length && a[0] < c) a.shift(); return a.length; };
+  function loadRemote() {
+    if (Date.now() - remoteChecked < 1000) return; remoteChecked = Date.now();
+    let m = 0; try { m = fs.statSync(remoteFile).mtimeMs; } catch { /* no file: off */ }
+    if (m === remoteM) return; remoteM = m;
+    try { remote = m ? JSON.parse(fs.readFileSync(remoteFile, 'utf8').replace(/^﻿/, '')) : {}; log('remote access: ' + (remote.enabled && remote.token ? 'ON' : 'off')); } catch (e: any) { remote = {}; log('remote.json unreadable (remote access stays off): ' + e.message); }
+  }
+  const gwPort = () => (server.address() as any).port as number;
+  const rserver = http.createServer((req, res) => {
+    try {
+      loadRemote();
+      if (!remote.enabled || !remote.token) return send(res, 503, { error: 'remote access is off' });
+      if (recent(fails) >= 30) return send(res, 429, { error: 'too many failed attempts' }, { 'retry-after': '60' });
+      const given = Buffer.from(/^Bearer (.+)$/i.exec(String(req.headers.authorization || ''))?.[1] || ''), want = Buffer.from(remote.token);
+      if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) { fails.push(Date.now()); return send(res, 401, { error: 'unauthorized' }); }
+      if (recent(hits) >= (remote.rpm || 120)) return send(res, 429, { error: 'rate limit reached, slow down' }, { 'retry-after': '10' });
+      hits.push(Date.now());
+      const url = new URL(req.url || '/', 'http://x'), parts = url.pathname.split('/').filter(Boolean);
+      if (!PROVIDERS.includes(parts[0] as Provider)) return send(res, 404, { error: 'use /groq/... or /gemini/...' });
+      if (Number(req.headers['content-length'] || 0) > 4e6) return send(res, 413, { error: 'request too large' });
+      const hdrs: http.OutgoingHttpHeaders = {}; for (const [k, v] of Object.entries(req.headers)) if (!DROP.has(k) && !k.startsWith('x-forwarded') && k !== 'origin') hdrs[k] = v;   // the gateway adds the real provider key itself
+      const up = http.request({ host: '127.0.0.1', port: gwPort(), path: `/${parts[0]}/phone/${parts.slice(1).join('/')}${url.search}`, method: req.method, headers: { ...hdrs, host: '127.0.0.1:' + gwPort() } }, (r) => { res.writeHead(r.statusCode || 502, r.headers); r.pipe(res); });
+      up.on('error', () => send(res, 502, { error: 'gateway unreachable' })); res.on('close', () => up.destroy()); req.pipe(up);
+    } catch (e: any) { log('remote error: ' + e.message); send(res, 500, { error: 'error' }); }
+  });
+  rserver.on('error', (e: any) => log('remote listener not started: ' + e.message));
+  await new Promise<void>((done) => { rserver.once('listening', () => done()); rserver.once('error', () => done()); rserver.listen(o.remotePort ?? REMOTE_PORT, '127.0.0.1'); });
+  const remotePort = () => (rserver.address() as any)?.port as number | undefined;
+  return { port: (server.address() as any).port as number, remotePort, stats: view, check, close: () => new Promise<void>((r) => { clearInterval(saver); dirty = true; save(); agent.destroy(); rserver.close(); rserver.closeAllConnections?.(); server.close(() => r()); server.closeAllConnections?.(); }) };
 }
 
 if (require.main === module) {

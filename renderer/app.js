@@ -310,7 +310,19 @@ V.envs = (p) => {
 
 // ---------- API KEYS (the gateway lives in its own process; this screen only reads its numbers) ----------
 V.keys = (p) => {
-  const body = el('div'), res = el('div'); let keysPaint = 0;
+  const body = el('div'), res = el('div'), remoteBox = el('div'); let keysPaint = 0;
+  // phone / remote access: its own slower refresh (it asks Tailscale), and the token is only ever copied, never shown
+  async function paintRemote() {
+    const r = await window.api.call('remote:status'); if (!r.ok) return; const s = r.data, up = s.enabled && s.funnelOn;
+    const line = (text) => el('div', { class: 'row' }, el('span', { class: 'mono' }, text), btn('Copy', () => copyText(text)));
+    remoteBox.replaceChildren(section('Phone and remote access', el('span', { class: 'muted' }, 'Off by default. When on, your phone can reach the gateway from anywhere with a secret token.')),
+      el('div', { class: 'row' }, mark(up ? 'ok' : s.enabled ? 'warn' : 'unk', up ? 'ON: reachable from the internet' : s.enabled ? 'switched on, tunnel not up yet' : 'off'),
+        sw('Remote access', s.enabled, async (v) => { const a = await call('remote:set', v); if (!a) return false; if (v && a.data.message !== 'on') toast(a.data.message, true); setTimeout(paintRemote, 600); return true; }),
+        btn('Copy token', async () => { const t = await call('remote:token'); if (t && t.data) await copyText(t.data); else toast('Switch remote access on first: it creates the token', true); }, '', { title: 'Copies the secret token without showing it. Paste it into the phone app settings.' }),
+        btn('New token', async () => { await call('remote:rotate'); toast('New token made; the old one no longer works'); }, '', { title: 'Replace the token; the phone needs the new one' }),
+        btn('Kill switch', async () => { await call('remote:kill'); toast('Remote access is off and the token was changed'); paintRemote(); }, 'danger', { title: 'Switch remote access off and invalidate the token at once' })),
+      s.url ? el('div', {}, el('p', { class: 'sub' }, 'In the phone app use one of these addresses and send the header Authorization: Bearer <token>. Only Groq and Gemini are reachable, up to ' + s.rpm + ' requests a minute.'), line(s.url + '/groq/openai/v1'), line(s.url + '/gemini')) : el('p', { class: 'sub' }, 'Tailscale was not found, so there is no public address yet.'));
+  }
   const n = (v) => (v || 0).toLocaleString();
   const cell = (c) => el('td', {}, `${n(c.req)}`, c.limited ? el('span', { class: 'w-warn' }, ` (${c.limited} limited)`) : null, c.err ? el('span', { class: 'w-bad' }, ` (${c.err} failed)`) : null);
   const when = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -343,8 +355,8 @@ V.keys = (p) => {
   }
   const checkRows = (r) => Array.isArray(r) ? resultRows(r.map((k) => ({ name: k.provider + ' / ' + k.label, ok: k.ok, detail: k.ok ? 'works' : 'HTTP ' + k.status + (k.message ? ' ' + k.message : ''), ms: 0 }))) : el('div', { class: 'w-bad' }, r.error || 'no answer');
   async function poll() { const r = await window.api.call('keys:status'); if (r.ok) paint(r.data); }
-  p.append(el('h1', {}, 'API keys'), el('p', { class: 'sub' }, 'Groq and Gemini only. Every program asks the gateway, the gateway picks the account with the fewest requests today and moves on when one runs out. Keys never appear on this screen.'), res, body);
-  poll(); every(4000, poll);
+  p.append(el('h1', {}, 'API keys'), el('p', { class: 'sub' }, 'Groq and Gemini only. Every program asks the gateway, the gateway picks the account with the fewest requests today and moves on when one runs out. Keys never appear on this screen.'), res, remoteBox, body);
+  poll(); every(4000, poll); paintRemote(); every(20000, paintRemote);
 };
 
 // ---------- PORTS ----------

@@ -97,5 +97,18 @@ const hit = (port: number, p: string, o: { method?: string; headers?: Record<str
   const gw8 = await startGateway({ port: 0, dir: d8, hosts: { groq: host }, log: () => {} });
   seen.length = 0; f = await hitFull(gw8.port, '/groq/news' + P); assert.strictEqual(f.status, 429); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_limited_aaaaaaaa'], 'the reserved account is never used by other programs');
   seen.length = 0; f = await hitFull(gw8.port, '/groq/relay1' + P); assert.strictEqual(f.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'the pinned program still uses it'); await gw8.close();
+  // 11. remote access (phone): off unless remote.json enables it; needs the token; only /groq and /gemini; counted as program "phone"; rate-limited; kill switch is immediate
+  const d9 = mk({ groq: [{ label: 'good', key: 'gsk_good_cccccccc' }], gemini: [] });
+  const gw9 = await startGateway({ port: 0, remotePort: 0, dir: d9, hosts: { groq: host }, log: () => {} }), rp = gw9.remotePort()!;
+  const rhit = (p: string, tok?: string) => new Promise<{ status: number; text: string }>((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port: rp, path: p, method: 'POST', headers: { 'content-type': 'application/json', ...(tok ? { authorization: 'Bearer ' + tok } : {}) } }, (x) => { let s = ''; x.on('data', (c) => (s += c)); x.on('end', () => resolve({ status: x.statusCode || 0, text: s })); }); q.on('error', reject); q.end('{"model":"m"}'); });
+  assert.strictEqual((await rhit('/groq/openai/v1/chat/completions', 'pcb_secret')).status, 503, 'off by default');
+  const rj = (o: object) => { fs.writeFileSync(path.join(d9, 'remote.json'), JSON.stringify(o)); return new Promise((r) => setTimeout(r, 1200)); };
+  await rj({ enabled: true, token: 'pcb_secret', rpm: 3 });
+  assert.strictEqual((await rhit('/groq/openai/v1/chat/completions')).status, 401, 'no token'); assert.strictEqual((await rhit('/groq/openai/v1/chat/completions', 'pcb_wrong1234')).status, 401, 'wrong token');
+  seen.length = 0; r = await rhit('/groq/openai/v1/chat/completions', 'pcb_secret'); assert.strictEqual(r.status, 200); assert.deepStrictEqual(seen.map((s) => s.key), ['gsk_good_cccccccc'], 'the gateway adds the real key');
+  assert.strictEqual((gw9.stats() as any).clients.find((c: any) => c.client === 'phone').req, 1, 'counted as the program "phone"');
+  assert.strictEqual((await rhit('/_stats', 'pcb_secret')).status, 404, 'admin routes are not reachable remotely'); assert.strictEqual((await rhit('/_check', 'pcb_secret')).status, 404);
+  await rhit('/groq/openai/v1/chat/completions', 'pcb_secret'); r = await rhit('/groq/openai/v1/chat/completions', 'pcb_secret'); assert.strictEqual(r.status, 429, 'rate limit (3 per minute here)');
+  await rj({ enabled: false, token: 'pcb_secret' }); assert.strictEqual((await rhit('/groq/openai/v1/chat/completions', 'pcb_secret')).status, 503, 'kill switch'); await gw9.close();
   fake.close(); for (const d of made) fs.rmSync(d, { recursive: true, force: true }); console.log('key gateway checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });
