@@ -3,7 +3,7 @@
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { KEYGW_PORT, keygwDir, daysOf } from './keygw';
 
 const keysFile = () => path.join(keygwDir(), 'keys.json');
@@ -18,10 +18,14 @@ function ask(p: string, method = 'GET', timeout = 3000): Promise<any> {
 }
 
 export const autostartOn = () => fs.existsSync(startupVbs());
+const TASK = 'PCBridgeKeyGateway';
+/** "Always on": a Startup shortcut (sign-in) plus a Task Scheduler job that runs it every minute. A second start finds the port taken and exits, so the job only matters when the gateway has died. */
 export function setAutostart(on: boolean): boolean {
   const f = startupVbs();
-  if (!on) { fs.rmSync(f, { force: true }); return false; }
-  fs.writeFileSync(f, `' Starts the PC Bridge key gateway (Groq / Gemini keys) when you sign in. Delete this file to stop that.\r\nCreateObject("WScript.Shell").Run """${process.execPath}"" ""${path.join(__dirname, 'keygw.js')}""", 0, False\r\n`);
+  if (!on) { fs.rmSync(f, { force: true }); spawnSync('schtasks', ['/Delete', '/TN', TASK, '/F'], { windowsHide: true }); return false; }
+  fs.writeFileSync(f, `' Starts the PC Bridge key gateway (Groq / Gemini keys) when you sign in, and every minute if it is not running. Switch it off in PC Bridge > API keys.\r\nCreateObject("WScript.Shell").Run """${process.execPath}"" ""${path.join(__dirname, 'keygw.js')}""", 0, False\r\n`);
+  const t = spawnSync('schtasks', ['/Create', '/TN', TASK, '/TR', `wscript.exe "${f}"`, '/SC', 'MINUTE', '/MO', '1', '/F'], { windowsHide: true });
+  if (t.status !== 0) console.error('key gateway watchdog task not created: ' + String(t.stderr || t.stdout).trim());
   return true;
 }
 

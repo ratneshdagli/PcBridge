@@ -456,7 +456,7 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
     fs.writeFileSync(svcFile, JSON.stringify({ port, token, pid: process.pid }));
     core.log('info', `PC Bridge service on http://127.0.0.1:${port}`);
     if (config.keepAwake) fwd.startKeepAwake(remote());
-    startTray(); paintTray(null); tick(); keyhub.ensure().catch((e) => core.log('err', 'key gateway: ' + e.message));
+    startTray(); paintTray(null); tick(); const keepGw = () => keyhub.ensure().catch((e) => core.log('err', 'key gateway: ' + e.message)); keepGw(); setInterval(keepGw, 30000).unref();   // bring the gateway back within 30 s if it ever stops
     if (apiCfg().enabled) pub.apply().catch((e) => core.log('err', 'API: ' + e.message));
     if (!process.argv.includes('--hidden') && !process.env.PCB_NO_UI) openUi(port, token);
     if (process.env.PCB_PRINT) console.log(JSON.stringify({ port, token }));
