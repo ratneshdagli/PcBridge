@@ -34,7 +34,8 @@ function buildRail() {
   for (const [id, label] of VIEWS) nav.append(el('button', { type: 'button', data: { v: id }, onclick: () => show(id), title: NAV_TIP[id] || label }, icon(ICON_OF[id]), el('span', {}, label)));
 }
 function paintRail() {
-  const s = status; const stale = s && Date.now() - s.ts > 15000; const ok = online() && !stale;
+  const q = cfg?.quiet, lim = q?.enabled ? ((q.pollSec || 20) * 2 + 10) * 1000 : 15000;   // quiet hours poll slower, so wait longer before calling the data old
+  const s = status; const stale = s && Date.now() - s.ts > lim; const ok = online() && !stale;
   $('#link-state').replaceChildren(mark(!s ? 'unk' : stale ? 'warn' : ok ? 'ok' : 'bad', !s ? 'CHECKING' : stale ? 'STALE' : ok ? 'OK' : 'DOWN'));
   $('#link-lat').textContent = s?.ssh?.latencyMs != null ? s.ssh.latencyMs + ' ms' : '';
   $('#link-names').textContent = 'THIS -- ' + (cfg ? remote().name.toLowerCase() : 'remote');
