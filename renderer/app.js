@@ -1,7 +1,7 @@
 'use strict';
 // PC Bridge UI. Screens are plain functions that build DOM into #main; live data arrives over SSE (status / fwd / log / projects).
-const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['envs', 'Global envs'], ['keys', 'API keys'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
-const NAV_TIP = { keys: 'One place for your Groq and Gemini keys: every program uses them through it, it moves to the next account when one runs out, and you see the hits per account, program and day', overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', envs: 'Every .env file on this PC and your other PCs in one place, grouped by folder: search, show, copy', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
+const VIEWS = [['overview', 'Overview'], ['containers', 'Containers'], ['ports', 'Ports'], ['sites', 'Move and split'], ['programs', 'Programs'], ['apps', 'Apps'], ['envs', 'Global envs'], ['keys', 'API keys'], ['crawler', 'Crawler'], ['forwards', 'Forwards'], ['api', 'API'], ['log', 'Log'], ['setup', 'Setup']];
+const NAV_TIP = { crawler: 'Live view of the website crawler (port 8900): running jobs, sites it reached, which layers are up, and a Copy as prompt button for any AI session', keys: 'One place for your Groq and Gemini keys: every program uses them through it, it moves to the next account when one runs out, and you see the hits per account, program and day', overview: 'Both PCs side by side, and your containers with a button to move each one to another PC', containers: 'Every container on this PC: where it runs and the Move button', ports: 'Every listening port on this PC and what uses it', programs: 'Move any program (Node, Python...) to another PC; it is copied to that PC\'s non-C drive and its port is forwarded', apps: 'Group several programs/containers (frontend, backend...) into one app and send the whole thing to another PC with one button; share it as a file', envs: 'Every .env file on this PC and your other PCs in one place, grouped by folder: search, show, copy', sites: 'Sites already moved: share the load (80/20...), bring back, test', forwards: 'Make a port of a connected PC appear on this PC', api: 'Let other programs (AI agents, scripts) use PC Bridge', log: 'Every command PC Bridge ran', setup: 'Connect another PC, backup address, start with Windows, quit' };
 // ---- clickable addresses (link / portLinks / dockerPorts are in ui.js) ----
 const pageLinks = (port, pages) => (pages || []).map((g) => link(port, g, g, { class: 'plink pg' }));
 /** Ports of containers on the OTHER PC: localhost when this PC forwards that port, otherwise the other PC's own address. */
@@ -16,7 +16,7 @@ async function editPages(kind, name, cur, after) {
   if (v === null) return;
   const r = await call('pages:set', kind, name, v.split(/[\s,]+/).filter(Boolean)); if (r) { toast('Saved'); await reloadCfg(); after(); }
 }
-const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', envs: 'envs', keys: 'keys', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
+const ICON_OF = { overview: 'overview', containers: 'containers', ports: 'ports', sites: 'split', programs: 'programs', apps: 'apps', envs: 'envs', keys: 'keys', crawler: 'crawler', forwards: 'forwards', api: 'api', log: 'log', setup: 'setup' };
 const V = {};
 let cfg = null, status = null, fwdState = [], cfgFile = '', cur = 'overview', openAtLogin = false, timers = [], ovDraw = null, fwdPaint = null, logAppend = null;
 const hist = { local: { cpu: [], ram: [] }, remote: { cpu: [], ram: [] } };
@@ -358,6 +358,29 @@ V.keys = (p) => {
   async function poll() { const r = await window.api.call('keys:status'); if (r.ok) paint(r.data); }
   p.append(el('h1', {}, 'API keys'), el('p', { class: 'sub' }, 'Groq and Gemini only. Every program asks the gateway, the gateway picks the account with the fewest requests today and moves on when one runs out. Keys never appear on this screen.'), res, remoteBox, body);
   poll(); every(4000, poll); paintRemote(); every(20000, paintRemote);
+};
+
+// ---------- CRAWLER (read-only view of the website crawler on port 8900) ----------
+V.crawler = (p) => {
+  const body = el('div');
+  const t = (v) => { if (v == null || v === '') return '-'; const d = new Date(typeof v === 'number' && v < 1e12 ? v * 1000 : v); return isNaN(d) ? String(v) : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); };
+  const jobMark = (st) => mark(/done|complete|finish/i.test(st) ? 'ok' : /fail|error/i.test(st) ? 'bad' : 'warn', String(st || '?'));
+  function paint(s) {
+    body.replaceChildren(el('div', { class: 'row' }, mark(s.up ? 'ok' : 'bad', s.up ? 'Crawler running on port ' + s.port : 'Crawler is not running (nothing answers on port ' + s.port + ')'),
+      btn('Copy as prompt', async () => { const r = await call('crawler:prompt'); if (r) await copyText(r.data); }, '', { title: 'Copies a short brief so any AI session can use the crawler' })));
+    if (!s.up) { body.append(el('div', { class: 'empty' }, 'Start the crawler from its own folder (D:\\All in one website). This tab fills in by itself as soon as it answers.')); return; }
+    const down = s.layers.filter((l) => !l.up);
+    body.append(section('Layers', el('span', { class: 'muted' }, `${s.layers.length - down.length} of ${s.layers.length} up · ${s.sessions} saved logins · ${s.schedules} schedules`)),
+      el('div', { class: 'row' }, s.layers.map((l) => mark(l.up ? 'ok' : 'unk', l.name))));
+    body.append(section('Jobs', el('span', { class: 'muted' }, `${s.jobs.length} shown`)),
+      s.jobs.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Job', 'State', 'Done', 'Started', 'Finished'].map((h) => el('th', {}, h)))), el('tbody', {}, s.jobs.slice(-30).reverse().map((j) => el('tr', {}, el('td', { class: 'mono' }, String(j.job_id || '').slice(0, 12)), el('td', {}, jobMark(j.status)), el('td', {}, `${j.done ?? 0} / ${j.total ?? '?'}`), el('td', {}, t(j.created)), el('td', {}, t(j.finished)))))) : el('div', { class: 'empty' }, 'No crawl jobs yet.'));
+    body.append(section('Sites reached', el('span', { class: 'muted' }, `${s.sites.length} sites`)),
+      s.sites.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Site', 'Result', 'Layer that worked', 'Error'].map((h) => el('th', {}, h)))), el('tbody', {}, s.sites.slice(-60).reverse().map((x) => el('tr', {}, el('td', { class: 'mono' }, x.host), el('td', {}, mark(x.ok ? 'ok' : 'bad', x.ok ? 'ok' : 'failed')), el('td', {}, x.lastLayer || '-'), el('td', { class: 'muted' }, x.error || ''))))) : el('div', { class: 'empty' }, 'No sites yet.'));
+  }
+  let busy = false;   // the crawler takes about 3 s to answer, so never start a second read while one is running
+  async function poll() { if (busy) return; busy = true; try { const r = await window.api.call('crawler:status'); if (r.ok) paint(r.data); } finally { busy = false; } }
+  p.append(el('h1', {}, 'Crawler'), el('p', { class: 'sub' }, 'Live view of the website crawler: what it is crawling, which sites it reached and which layers are up. This tab only reads; it never starts a crawl. Results are returned to the program that asked and are not saved to disk.'), body);
+  poll(); every(4000, poll);
 };
 
 // ---------- PORTS ----------

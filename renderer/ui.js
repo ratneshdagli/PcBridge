@@ -98,4 +98,5 @@ const ICONS = {
   overview: 'M2 3h12M2 8h12M2 13h12', containers: 'M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6', ports: 'M2 8h3M11 8h3M5 5h6v6H5z',
   split: 'M2 4h5l2 4h5M2 12h5l2-4', programs: 'M3 3h10v10H3zM6 6l2 2-2 2M9 10h2', apps: 'M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z', forwards: 'M2 8h11M9 4l4 4-4 4', envs: 'M3 2h7l3 3v9H3zM10 2v3h3M5 8h6M5 11h6', api: 'M5 3L2 8l3 5M11 3l3 5-3 5', keys: 'M5 11a3 3 0 110-6 3 3 0 010 6zM8 8h6M12 8v3', log: 'M3 3h10M3 6h7M3 9h10M3 12h6', setup: 'M2 5h12M2 11h12M6 3v4M10 9v4',
 };
+ICONS.crawler = 'M8 2a6 6 0 100 12A6 6 0 008 2zM2 8h12M8 2c2.5 2.5 2.5 9.5 0 12M8 2c-2.5 2.5-2.5 9.5 0 12';
 const icon = (k) => svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('path', { d: ICONS[k] }));

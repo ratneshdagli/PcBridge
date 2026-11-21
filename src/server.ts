@@ -13,6 +13,7 @@ import * as apps from './apps';
 import * as envs from './envs';
 import * as keyhub from './keyhub';
 import * as endpoints from './endpoints';
+import * as crawler from './crawler';
 import { PublicApi, newToken, defaultApi } from './publicapi';
 
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
@@ -309,6 +310,8 @@ $t.Start(); $n.Icon=Dot 'grey'; [Windows.Forms.Application]::Run()`;
   H['envs:clear'] = () => { envs.clearEnvScan(); return true; };
   H['envs:reveal'] = (p: string) => envs.revealEnv(String(p));
   // ---- API keys: the gateway (keygw.ts) is its own process; these only start it and read its numbers ----
+  H['crawler:status'] = () => crawler.status();   // UI only: read-only GETs to the crawler on 8900
+  H['crawler:prompt'] = () => crawler.prompt();
   H['keys:status'] = () => keyhub.status();
   H['keys:start'] = async () => { keyhub.start(); await new Promise((r) => setTimeout(r, 1500)); return keyhub.status(); };
   H['keys:check'] = () => keyhub.check();
