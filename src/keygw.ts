@@ -166,7 +166,8 @@ export async function startGateway(o: Opts = {}) {
       const chunks: Buffer[] = []; let n = 0;
       for await (const c of req) { n += (c as Buffer).length; if (n > BODY_LIMIT) return send(res, 413, { error: 'request too large' }); chunks.push(c as Buffer); }
       const body = Buffer.concat(chunks), q = new URLSearchParams(url.search); q.delete('key');
-      const upPath = '/' + parts.slice(2).join('/') + (q.toString() ? '?' + q.toString() : '');
+      // Google retired these for these accounts (404): a caller still asking for one gets the current flash model instead of resting every account for 6 hours
+      const upPath = ('/' + parts.slice(2).join('/') + (q.toString() ? '?' + q.toString() : '')).replace(/models\/gemini-(2\.0-flash(-lite)?|1\.5-flash(-8b)?|1\.5-pro|2\.5-flash-lite)(?=[:/?]|$)/, 'models/gemini-2.5-flash');
       let model = '*'; const m = /models\/([^:/?]+)/.exec(upPath);
       if (m) model = decodeURIComponent(m[1]); else if (body.length && body.length < 8e6 && /json/.test(String(req.headers['content-type']))) { try { model = String(JSON.parse(body.toString('utf8')).model || '*'); } catch { /* not JSON */ } }
       if (model !== '*' && model.length <= 80 && seenModels[p].size < 60) seenModels[p].add(model);
