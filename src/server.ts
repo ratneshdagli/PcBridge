@@ -14,6 +14,7 @@ import * as envs from './envs';
 import * as keyhub from './keyhub';
 import * as endpoints from './endpoints';
 import * as crawler from './crawler';
+import { ownTaskbarIcon } from './taskbar';
 import { PublicApi, newToken, defaultApi } from './publicapi';
 
 const dataDir = process.env.PCB_USERDATA || path.join(process.env.APPDATA || os.homedir(), 'pc-bridge');
@@ -44,18 +45,19 @@ async function existing(): Promise<{ port: number; token: string } | null> {
 }
 
 // ---- UI window: Edge/Chrome in --app mode (chromeless). Prefer the browser already running so no new browser process is started. ----
-function openUi(port: number, tok: string) {
+function openUi(port: number, tok: string): Promise<unknown> {
   const pf = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean) as string[];
   const cand = ['Microsoft\\Edge\\Application\\msedge.exe', 'Google\\Chrome\\Application\\chrome.exe'].flatMap((b) => pf.map((p) => path.join(p, b))).filter((f) => fs.existsSync(f));
   const tl = spawnSync('tasklist', ['/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true }).stdout || '';
   const running = cand.find((f) => tl.toLowerCase().includes(path.basename(f).toLowerCase())) || cand[0];
   const url = `http://127.0.0.1:${port}/?t=${tok}`;
-  if (!running) { spawn('cmd', ['/c', 'start', '', url], { windowsHide: true, detached: true, stdio: 'ignore' }).unref(); return; }
+  if (!running) { spawn('cmd', ['/c', 'start', '', url], { windowsHide: true, detached: true, stdio: 'ignore' }).unref(); return Promise.resolve(); }
   spawn(running, [`--app=${url}`, '--window-size=1120,800'], { detached: true, stdio: 'ignore' }).unref();
+  return ownTaskbarIcon();   // so "Pin to taskbar" pins PC Bridge, not the browser
 }
 
 if (!process.env.PCB_FORCE_NEW) {
-  existing().then((s) => { if (s) { if (!process.argv.includes('--hidden')) openUi(s.port, s.token); process.exit(0); } main(); });
+  existing().then(async (s) => { if (s) { if (!process.argv.includes('--hidden')) await openUi(s.port, s.token); process.exit(0); } main(); });
 } else main();
 
 function main() {
